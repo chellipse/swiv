@@ -1,0 +1,21 @@
+[package]
+name = "untitled-image-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release] # for perf
+debug = true
+opt-level = 3
+strip = false
+
+[dependencies]
+anyhow = "1.0.99"
+bytemuck = { version = "1.23.2", features = ["derive"] }
+clap = { version = "4.5.46", features = ["derive"] }
+env_logger = "0.11.8"
+image = "0.25.6"
+lcms2 = "6.1.1"
+log = "0.4.27"
+pollster = "0.4.0"
+wgpu = "26.0.1"
+winit = "0.30.12"
