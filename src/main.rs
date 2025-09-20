@@ -1,15 +1,14 @@
 use std::{
-    ops::Add,
+    fmt::Debug,
+    fs::{self, DirEntry},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::Result;
 use clap::Parser;
-use image::{DynamicImage, EncodableLayout, ImageDecoder};
-use wgpu::{
-    util::DeviceExt, BindGroup, Buffer, Device, Features, RenderPass, TextureFormat, TextureUsages,
-};
+use itertools::Itertools;
+use wgpu::{Features, TextureFormat, TextureUsages};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, WindowEvent},
@@ -18,277 +17,77 @@ use winit::{
     window::{Window, WindowId},
 };
 
+mod lazy;
+
+use lazy::{ImageLoaderServiceHandle, ImageResizeSpec, LazyImage};
+
 #[derive(Debug, Clone, Parser)]
 struct Cli {
-    image: PathBuf,
+    /// Can be a file or directory
+    target: PathBuf,
+
+    #[arg(short, long)]
+    recursive: bool,
+
+    /// How many levels of nesting to traverse if recursion is enabled
+    #[arg(long, default_value_t = 16)]
+    recursion_limit: u8,
 }
 
-#[derive(Debug)]
-struct GenericImage {
-    width: u32,
-    height: u32,
-    bytes: Vec<u8>,
-    format: TextureFormat,
-    pixel_width: u32,
-}
+impl Cli {
+    fn get_paths(&self) -> Result<Vec<PathBuf>> {
+        let recursion = self.recursive.then_some(self.recursion_limit).unwrap_or(0);
 
-impl GenericImage {
-    fn new(path: impl AsRef<Path>) -> Result<Self> {
-        log::debug!("Path: {:?}", path.as_ref());
+        let target = match self.target.metadata()?.is_dir() {
+            true => self.target.clone(),
+            false => self.target.parent().unwrap().to_path_buf(),
+        };
 
-        let mut decoder = image::ImageReader::open(&path)?.into_decoder()?;
-        let icc_profile = decoder.icc_profile()?;
-        let mut img = DynamicImage::from_decoder(decoder)?;
-
-        const MAX_WIDTH: u32 = 2u32.pow(12);
-        const MAX_HEIGHT: u32 = 2u32.pow(12);
-        if img.width() > MAX_WIDTH || img.height() > MAX_HEIGHT {
-            log::debug!(
-                "Resize: {}x{} Len {} from {:?}",
-                img.width(),
-                img.height(),
-                img.as_bytes().len(),
-                path.as_ref(),
-            );
-            img = img.resize(MAX_WIDTH, MAX_HEIGHT, image::imageops::FilterType::Triangle);
-        }
-
-        let width = img.width();
-        let height = img.height();
-
-        // let (bytes, format, pixel_width) = match img {
-        //     DynamicImage::ImageRgb8(img) => {
-        //         log::debug!("Processing ImageRgb8 format, converting to Rgba8UnormSrgb");
-        //         (
-        //             img.as_bytes()
-        //                 .chunks(3)
-        //                 .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], u8::MAX])
-        //                 .collect(),
-        //             TextureFormat::Rgba8Unorm,
-        //             4,
-        //         )
-        //     }
-        //     DynamicImage::ImageRgba8(img) => {
-        //         log::debug!("Processing ImageRgba8 format, using Rgba8Unorm");
-        //         (img.as_bytes().to_vec(), TextureFormat::Rgba8Unorm, 4)
-        //     }
-        //     DynamicImage::ImageRgb16(img) => {
-        //         log::debug!(
-        //             "Processing ImageRgb16 format, converting to Rgba8UnormSrgb with bit shifting"
-        //         );
-        //         (
-        //             img.as_bytes()
-        //                 .chunks(6)
-        //                 .flat_map(|slice| {
-        //                     let r = u16::from_ne_bytes([slice[0], slice[1]]) >> 8;
-        //                     let g = u16::from_ne_bytes([slice[2], slice[3]]) >> 8;
-        //                     let b = u16::from_ne_bytes([slice[4], slice[5]]) >> 8;
-        //                     [r as u8, g as u8, b as u8, u8::MAX]
-        //                 })
-        //                 .collect(),
-        //             TextureFormat::Rgba8UnormSrgb,
-        //             4,
-        //         )
-        //     }
-        //     DynamicImage::ImageRgba16(img) => {
-        //         log::debug!(
-        //             "Processing ImageRgba16 format, converting to Rgba8UnormSrgb with bit shifting"
-        //         );
-        //         (
-        //             img.as_bytes()
-        //                 .chunks(8)
-        //                 .flat_map(|slice| {
-        //                     let r = u16::from_ne_bytes([slice[0], slice[1]]) >> 8;
-        //                     let g = u16::from_ne_bytes([slice[2], slice[3]]) >> 8;
-        //                     let b = u16::from_ne_bytes([slice[4], slice[5]]) >> 8;
-        //                     let a = u16::from_ne_bytes([slice[6], slice[7]]) >> 8;
-        //                     [r as u8, g as u8, b as u8, a as u8]
-        //                 })
-        //                 .collect(),
-        //             TextureFormat::Rgba8UnormSrgb,
-        //             4,
-        //         )
-        //     }
-        //     DynamicImage::ImageRgb32F(_) => {
-        //         return Err(anyhow!(
-        //             "Unhandled DynamicImage type: Rgb32F from {:?}",
-        //             path.as_ref()
-        //         ));
-        //     }
-        //     DynamicImage::ImageRgba32F(_) => {
-        //         return Err(anyhow!(
-        //             "Unhandled DynamicImage type: Rgba32F from {:?}",
-        //             path.as_ref()
-        //         ));
-        //     }
-        //     DynamicImage::ImageLuma8(_) => {
-        //         log::debug!("Processing ImageLuma8 format, converting to Rgba8UnormSrgb via to_rgba8() from {:?}", path.as_ref());
-        //         // This means it'll take up more space than technically needed on the gpu.
-        //         // Could possilby handle this in the shader to avoid the conversion
-        //         (
-        //             img.to_rgba8().as_bytes().to_vec(),
-        //             TextureFormat::Rgba8UnormSrgb,
-        //             4,
-        //         )
-        //     }
-        //     DynamicImage::ImageLumaA8(_) => {
-        //         return Err(anyhow!(
-        //             "Unhandled DynamicImage type: LumaA8 from {:?}",
-        //             path.as_ref()
-        //         ));
-        //     }
-        //     DynamicImage::ImageLuma16(_) => {
-        //         return Err(anyhow!(
-        //             "Unhandled DynamicImage type: Luma16 from {:?}",
-        //             path.as_ref()
-        //         ));
-        //     }
-        //     DynamicImage::ImageLumaA16(_) => {
-        //         return Err(anyhow!(
-        //             "Unhandled DynamicImage type: LumaA16 from {:?}",
-        //             path.as_ref()
-        //         ));
-        //     }
-        //     _ => return Err(anyhow!("Unhandled DynamicImage type: ")),
-        // };
-        // log::info!("Final Len: {}", bytes.len());
-
-        // ig we'll see if this is too expensive
-        let mut bytes = img.to_rgba8().as_bytes().to_vec();
-        let format = TextureFormat::Rgba8UnormSrgb;
-        let pixel_width = 4;
-
-        if let Some(data) = icc_profile {
-            let profile = lcms2::Profile::new_icc(&data)?;
-            let t = lcms2::Transform::new(
-                &profile,
-                lcms2::PixelFormat::RGBA_8,
-                &lcms2::Profile::new_srgb(),
-                lcms2::PixelFormat::RGBA_8,
-                lcms2::Intent::Perceptual,
-            )?;
-
-            log::debug!("Transforming {:?} via ICC profile.", path.as_ref());
-            t.transform_in_place(&mut bytes);
-        }
-
-        Ok(Self {
-            width,
-            height,
-            bytes,
-            format,
-            pixel_width,
-        })
-    }
-}
-
-struct RenderableImage {
-    bind_group: BindGroup,
-    vertex_buffer: Buffer,
-    width: u32,
-    height: u32,
-    visible: bool,
-}
-
-impl RenderableImage {
-    fn new(device: &Device, bind_group: BindGroup, width: u32, height: u32) -> Self {
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&[0.0f32; 6 * 4]),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::MAP_WRITE,
-        });
-
-        Self {
-            bind_group,
-            vertex_buffer,
-            width,
-            height,
-            visible: false,
-        }
+        Ok(Self::open_dir(&target, recursion)?
+            .map(|entry| entry.path())
+            .sorted_by(|a, b| {
+                lexical_sort::natural_lexical_cmp(&a.to_string_lossy(), &b.to_string_lossy())
+            })
+            .collect())
     }
 
-    fn render(&self, renderpass: &mut RenderPass) {
-        if self.visible {
-            renderpass.set_bind_group(0, &self.bind_group, &[]);
-            renderpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            renderpass.draw(0..6, 0..1);
-        }
-    }
+    fn open_dir(
+        dir: impl AsRef<Path>,
+        recursion: u8,
+    ) -> Result<Box<dyn Iterator<Item = DirEntry>>> {
+        Ok(Box::new(
+            fs::read_dir(dir.as_ref())?
+                .flatten()
+                .flat_map(move |entry| {
+                    let ft = entry
+                        .metadata()
+                        .expect("Failed to get metadata")
+                        .file_type();
 
-    fn resize(&mut self, vp_width: u32, vp_height: u32, pos: u32, rows: u32) {
-        let row_unit = 2.0 / rows as f32;
-
-        let col_space = vp_width as f32 / (vp_height as f32 / rows as f32);
-        let col_unit = 2.0 / col_space;
-        let cols = col_space.trunc() as u32;
-        let col_margin = (col_space % 1.0) * col_unit;
-
-        if pos >= (rows * cols) || cols == 0 {
-            self.visible = false;
-            return;
-        } else {
-            self.visible = true;
-        }
-
-        let pos_x = (pos % cols) as f32;
-        let pos_y = ((pos - pos_x as u32) / cols) as f32;
-
-        let width = self.width;
-        let height = self.height;
-
-        let capturable = self.vertex_buffer.clone();
-        self.vertex_buffer
-            .map_async(wgpu::MapMode::Write, .., move |result| {
-                if result.is_ok() {
-                    #[rustfmt::skip]
-                    let mut vertices: [f32; 24] = [
-                        // Position x-y Texture x-y
-                        -1.0 + (pos_x * col_unit), 1.0 - (pos_y.add(1.0) * row_unit), 0.0, 1.0, // Bottom left
-                        -1.0 + (pos_x.add(1.0) * col_unit), 1.0 - (pos_y.add(1.0) * row_unit), 1.0, 1.0, // Bottom right
-                        -1.0 + (pos_x * col_unit), 1.0 - (pos_y * row_unit), 0.0, 0.0, // Top left
-                        -1.0 + (pos_x * col_unit), 1.0 - (pos_y * row_unit), 0.0, 0.0, // Top left
-                        -1.0 + (pos_x.add(1.0) * col_unit), 1.0 - (pos_y.add(1.0) * row_unit), 1.0, 1.0, // Bottom right
-                        -1.0 + (pos_x.add(1.0) * col_unit), 1.0 - (pos_y * row_unit), 1.0, 0.0, // Top right
-                    ];
-
-                    vertices.chunks_mut(4).for_each(|slice| {
-                        slice[0] = slice[0] + (col_margin / 2.0);
-                    });
-
-                    let aspect = width as f32 / height as f32;
-                    match aspect {
-                        x if x > 1.0 => {
-                            let error = 1.0 / aspect - 1.0;
-                            let half_abs_err = error.abs() / 2.0;
-                            let unit_offset = half_abs_err * row_unit;
-                            vertices[1] += unit_offset; // Bottom left
-                            vertices[5] += unit_offset; // Bottom right
-                            vertices[9] -= unit_offset; // Top left
-                            vertices[13] -= unit_offset; // Top left
-                            vertices[17] += unit_offset; // Bottom right
-                            vertices[21] -= unit_offset; // Top right
-                        }
-                        x if x < 1.0 => {
-                            let error = aspect - 1.0;
-                            let half_abs_err = error.abs() / 2.0;
-                            let unit_offset = half_abs_err * col_unit;
-                            vertices[0] += unit_offset; // Bottom left
-                            vertices[4] -= unit_offset; // Bottom right
-                            vertices[8] += unit_offset; // Top left
-                            vertices[12] += unit_offset; // Top left
-                            vertices[16] -= unit_offset; // Bottom right
-                            vertices[20] -= unit_offset; // Top right
-                        }
-                        _ => {}
+                    if ft.is_file() {
+                        let iter: Box<dyn Iterator<Item = DirEntry>> =
+                            Box::new(std::iter::once(entry));
+                        return Some(iter);
                     }
 
-                    let mut view = capturable.get_mapped_range_mut(..);
-                    let floats: &mut [f32] = bytemuck::cast_slice_mut(&mut view);
-                    floats.copy_from_slice(&vertices[..]);
-                    drop(view);
-                    capturable.unmap();
-                }
-            });
+                    if recursion > 0 && ft.is_dir() {
+                        // if let Some(name) = path.file_name() {
+                        //     if name.as_encoded_bytes().get(0) != Some(&b'.') {
+                        //         return Self::open_dir(path, recursion.saturating_sub(1)).ok();
+                        //     }
+                        // }
+                        return Self::open_dir(entry.path(), recursion.saturating_sub(1)).ok();
+                    }
+
+                    if ft.is_symlink() {
+                        return None;
+                    }
+
+                    // filter other stuff, such are sockets
+                    None
+                })
+                .flatten(),
+        ))
     }
 }
 
@@ -300,12 +99,13 @@ struct State {
     surface: wgpu::Surface<'static>,
     surface_format: TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
-    images: Vec<RenderableImage>,
+    images: Vec<LazyImage>,
     rows: u32,
+    offset: u64,
 }
 
 impl State {
-    async fn new(window: Arc<Window>) -> State {
+    async fn new(window: Arc<Window>, cli: &Cli) -> State {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -319,9 +119,6 @@ impl State {
             })
             .await
             .unwrap();
-
-        let limits = adapter.limits();
-        log::info!("LIMITS: {:#?}", limits);
 
         let size = window.inner_size();
 
@@ -416,88 +213,15 @@ impl State {
             ..Default::default()
         });
 
-        let imgs: Vec<_> = std::env::args()
-            .nth(1)
-            .and_then(|dir_path| std::fs::read_dir(dir_path).ok())
+        let image_loader_service_handle =
+            ImageLoaderServiceHandle::new(&device, &queue, &bind_group_layout, &sampler, 0);
+
+        let paths = cli.get_paths().unwrap();
+        log::info!("Path count: {}", paths.len());
+
+        let images: Vec<_> = paths
             .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.ok())
-            .filter_map(|entry| {
-                let path = entry.path();
-                if path.is_file() {
-                    path.to_str().and_then(|p| {
-                        let img = GenericImage::new(p);
-                        if img.is_err() {
-                            log::warn!("{:?} from {p:?}", img.unwrap_err());
-                            None
-                        } else {
-                            img.ok()
-                        }
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let images = imgs
-            .iter()
-            .map(|img| {
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: None,
-                    size: wgpu::Extent3d {
-                        width: img.width,
-                        height: img.height,
-                        depth_or_array_layers: 1,
-                    },
-                    // TODO add/try mipmapping
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: img.format,
-                    usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-
-                let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    layout: &bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&texture_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&sampler),
-                        },
-                    ],
-                    label: Some("texture_bind_group"),
-                });
-
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &img.bytes,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(img.width * img.pixel_width), // Assuming RGBA
-                        rows_per_image: Some(img.height),
-                    },
-                    wgpu::Extent3d {
-                        width: img.width,
-                        height: img.height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-
-                RenderableImage::new(&device, bind_group, img.width, img.height)
-            })
+            .map(|path| LazyImage::new(path, None, image_loader_service_handle.clone_sender()))
             .collect();
 
         let state = Self {
@@ -510,6 +234,7 @@ impl State {
             render_pipeline,
             images,
             rows: 3,
+            offset: 0,
         };
 
         state.configure_surface();
@@ -535,9 +260,52 @@ impl State {
         if let Some(new_size) = new_size {
             self.size = new_size;
         }
-        for (i, img) in self.images.iter_mut().enumerate() {
-            img.resize(self.size.width, self.size.height, i as u32, self.rows);
+
+        let cols = ImageResizeSpec::new(
+            self.size.width,
+            self.size.height,
+            0,
+            self.rows,
+            self.offset as u32,
+        )
+        .cols
+        .max(1) as u64; // HACK avoid div by zero
+
+        let max_offset = (self.images.len() as u64)
+            .div_ceil(cols)
+            .saturating_sub(self.rows as u64);
+        if self.offset > max_offset {
+            self.offset = max_offset;
         }
+
+        let mut slot: u32 = 0;
+        self.images.retain_mut(|img| {
+            log::debug!("Resizing: {:?}", img.path);
+            let spec = ImageResizeSpec::new(
+                self.size.width,
+                self.size.height,
+                slot,
+                self.rows,
+                self.offset as u32,
+            );
+            if spec.visible {
+                match img.resize(spec) {
+                    Ok(()) => {
+                        slot += 1;
+                        true
+                    }
+                    Err(e) => {
+                        log::warn!("{e:?}");
+                        false
+                    }
+                }
+            } else {
+                slot += 1;
+                img.visible = false;
+                true
+            }
+        });
+
         self.configure_surface();
     }
 
@@ -572,21 +340,48 @@ impl State {
 
         renderpass.set_pipeline(&self.render_pipeline);
 
-        self.images
-            .iter()
-            .for_each(|img| img.render(&mut renderpass));
+        let mut was_err = false;
+        self.images.retain_mut(|img| {
+            if img.visible {
+                match img.render(&mut renderpass) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::warn!("{e:?}");
+                        was_err = true;
+                        false
+                    }
+                }
+            } else {
+                true
+            }
+        });
 
         drop(renderpass);
 
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         surface_texture.present();
+
+        if was_err {
+            self.resize(None);
+        }
     }
 }
 
-#[derive(Default)]
 struct App {
     state: Option<State>,
+    shifted: bool,
+    cli: Cli,
+}
+
+impl App {
+    fn new(cli: Cli) -> Self {
+        Self {
+            state: None,
+            shifted: false,
+            cli,
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -598,7 +393,7 @@ impl ApplicationHandler for App {
                 .unwrap(),
         );
 
-        let state = pollster::block_on(State::new(window.clone()));
+        let state = pollster::block_on(State::new(window.clone(), &self.cli));
         self.state = Some(state);
 
         window.request_redraw();
@@ -612,6 +407,7 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
+                // log::debug!("Redraw");
                 state.render();
                 // Emits a new redraw requested event.
                 state.window.request_redraw();
@@ -624,31 +420,51 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { .. } => {}
             WindowEvent::KeyboardInput { event, .. } => {
+                match event.physical_key {
+                    PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight) => {
+                        self.shifted = match event.state {
+                            ElementState::Pressed => true,
+                            ElementState::Released => false,
+                        };
+                    }
+                    _ => {}
+                }
+
                 if event.state == ElementState::Pressed {
                     match event.physical_key {
-                        PhysicalKey::Code(KeyCode::KeyQ) | PhysicalKey::Code(KeyCode::Escape) => {
+                        PhysicalKey::Code(KeyCode::KeyQ | KeyCode::Escape) => {
                             event_loop.exit();
                         }
-                        _ => {}
-                    }
-
-                    match event.logical_key.to_text() {
-                        Some("+") => {
-                            state.rows = state.rows.saturating_sub(1).max(1);
+                        PhysicalKey::Code(KeyCode::KeyJ | KeyCode::ArrowDown) => {
+                            state.offset = state.offset.saturating_add(1);
                             state.resize(None);
                         }
-                        Some("-") => {
-                            state.rows = state.rows.saturating_add(1).min(64);
+                        PhysicalKey::Code(KeyCode::KeyK | KeyCode::ArrowUp) => {
+                            if state.offset != 0 {
+                                state.offset = state.offset.saturating_sub(1);
+                                state.resize(None);
+                            }
+                        }
+                        PhysicalKey::Code(KeyCode::Equal) => {
+                            if self.shifted {
+                                state.rows = state.rows.saturating_sub(1).max(1);
+                                state.resize(None);
+                            } else {
+                                if state.rows != 3 {
+                                    state.rows = 3;
+                                    state.resize(None);
+                                }
+                            }
+                        }
+                        PhysicalKey::Code(KeyCode::Minus) => {
+                            state.rows = state.rows.saturating_add(1).min(32);
                             state.resize(None);
                         }
                         _ => {}
                     }
                 }
-                // log::info!("EVENT: {event:?}");
             }
-            _ => {
-                // log::info!("EVENT: {event:?}");
-            }
+            _ => {}
         }
     }
 }
@@ -662,6 +478,6 @@ fn main() {
 
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::default();
+    let mut app = App::new(Cli::parse());
     event_loop.run_app(&mut app).unwrap();
 }
