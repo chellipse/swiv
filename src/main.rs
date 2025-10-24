@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Parser;
 use itertools::Itertools;
 use wgpu::{Features, TextureFormat, TextureUsages};
@@ -40,7 +40,7 @@ impl Cli {
 
         let target = match self.target.metadata()?.is_dir() {
             true => self.target.clone(),
-            false => self.target.parent().unwrap().to_path_buf(),
+            false => self.target.parent().ok_or(anyhow!("None"))?.to_path_buf(),
         };
 
         Ok(Self::open_dir(&target, recursion)?
@@ -390,7 +390,7 @@ impl State {
         self.configure_surface();
     }
 
-    fn render(&mut self) {
+    fn render(&mut self) -> bool {
         let surface_texture = self
             .surface
             .get_current_texture()
@@ -438,11 +438,18 @@ impl State {
             }
         });
 
+        // Check if we have no more images to display
+        if self.images.is_empty() {
+            eprintln!("{}: no more files to display, aborting", env!("CARGO_PKG_NAME"));
+            return false;
+        }
+
         // Render selection indicator after all images
         // Find the selected image and render its indicator
         for img in &self.images {
             if let Some((vertices, bind_group)) = img.get_selection_indicator() {
-                self.queue.write_buffer(&self.selection_buffer, 0, bytemuck::cast_slice(&vertices));
+                self.queue
+                    .write_buffer(&self.selection_buffer, 0, bytemuck::cast_slice(&vertices));
                 renderpass.set_pipeline(&self.invert_pipeline);
                 renderpass.set_bind_group(0, bind_group, &[]);
                 renderpass.set_vertex_buffer(0, self.selection_buffer.slice(..));
@@ -460,6 +467,8 @@ impl State {
         if was_err {
             self.resize(None);
         }
+
+        true
     }
 
     fn move_left(&mut self) {
@@ -553,7 +562,11 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 // log::debug!("Redraw");
-                state.render();
+                if !state.render() {
+                    // No more images to display
+                    event_loop.exit();
+                    return;
+                }
                 // Emits a new redraw requested event.
                 state.window.request_redraw();
             }

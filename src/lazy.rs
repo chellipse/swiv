@@ -85,10 +85,10 @@ impl LazyImage {
         }
 
         match &self.state {
-            LazyImageState::Initialized(resp) => {
-                resp.renderable_image.get_selection_indicator_vertices()
-                    .map(|verts| (verts, &resp.renderable_image.bind_group))
-            }
+            LazyImageState::Initialized(resp) => resp
+                .renderable_image
+                .get_selection_indicator_vertices()
+                .map(|verts| (verts, &resp.renderable_image.bind_group)),
             _ => None,
         }
     }
@@ -308,6 +308,7 @@ impl ImageLoaderServiceHandle {
             (0, Err(_)) => 1,
             (a, Err(_)) => a.min(4),
         };
+        log::info!("ImageLoaderService parallelism: {parallelism}");
 
         let (sender, receiver) = unbounded::<ImageRequest>();
         let mut handles = Vec::new();
@@ -445,21 +446,22 @@ impl RenderableImage {
 
     /// Get the vertices for the selection indicator if this image has position info
     pub fn get_selection_indicator_vertices(&self) -> Option<[f32; 24]> {
-        self.selection_pos.map(|(pos_x, pos_y, col_unit, row_unit, col_margin)| {
-            let indicator_size = 0.1; // Size in grid units
-            let margin_offset = col_margin / 2.0;
-            #[rustfmt::skip]
-            let indicator_vertices: [f32; 24] = [
-                // Position x-y, Texture x-y (texture coords don't matter for inversion)
-                -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top left
-                -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top right
-                -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom left
-                -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom left
-                -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top right
-                -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom right
-            ];
-            indicator_vertices
-        })
+        self.selection_pos
+            .map(|(pos_x, pos_y, col_unit, row_unit, col_margin)| {
+                let indicator_size = 0.1; // Size in grid units
+                let margin_offset = col_margin / 2.0;
+                #[rustfmt::skip]
+                let indicator_vertices: [f32; 24] = [
+                    // Position x-y, Texture x-y (texture coords don't matter for inversion)
+                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top left
+                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top right
+                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom left
+                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom left
+                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top right
+                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom right
+                ];
+                indicator_vertices
+            })
     }
 
     pub fn resize(&mut self, size: &ImageResizeSpec) {
