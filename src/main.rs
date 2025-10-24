@@ -101,6 +101,7 @@ struct State {
     render_pipeline: wgpu::RenderPipeline,
     invert_pipeline: wgpu::RenderPipeline,
     selection_buffer: wgpu::Buffer,
+    selection_bind_group: wgpu::BindGroup,
     images: Vec<LazyImage>,
     rows: u32,
     selected_idx: usize,
@@ -272,6 +273,59 @@ impl State {
             mapped_at_creation: false,
         });
 
+        // Create a dummy 1x1 white texture for the selection indicator
+        let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Dummy selection texture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &dummy_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[255u8, 255u8, 255u8, 255u8], // White pixel
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let dummy_texture_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let selection_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&dummy_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+            label: Some("Selection indicator bind group"),
+        });
+
         let image_loader_service_handle =
             ImageLoaderServiceHandle::new(&device, &queue, &bind_group_layout, &sampler, 0);
 
@@ -293,6 +347,7 @@ impl State {
             render_pipeline,
             invert_pipeline,
             selection_buffer,
+            selection_bind_group,
             images,
             rows: 3,
             selected_idx: 0,
@@ -447,11 +502,11 @@ impl State {
         // Render selection indicator after all images
         // Find the selected image and render its indicator
         for img in &self.images {
-            if let Some((vertices, bind_group)) = img.get_selection_indicator() {
+            if let Some(vertices) = img.get_selection_indicator_vertices() {
                 self.queue
                     .write_buffer(&self.selection_buffer, 0, bytemuck::cast_slice(&vertices));
                 renderpass.set_pipeline(&self.invert_pipeline);
-                renderpass.set_bind_group(0, bind_group, &[]);
+                renderpass.set_bind_group(0, &self.selection_bind_group, &[]);
                 renderpass.set_vertex_buffer(0, self.selection_buffer.slice(..));
                 renderpass.draw(0..6, 0..1);
                 break; // Only one image should be selected

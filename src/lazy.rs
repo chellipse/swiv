@@ -23,6 +23,7 @@ pub struct LazyImage {
     pub size: Option<ImageResizeSpec>,
     pub visible: bool,
     pub selected: bool,
+    selection_pos: Option<(f32, f32, f32, f32, f32)>, // (x, y, col_unit, row_unit, col_margin)
 }
 
 impl LazyImage {
@@ -37,6 +38,7 @@ impl LazyImage {
             state: LazyImageState::Uninitialized(req_sender),
             visible: false,
             selected: false,
+            selection_pos: None,
         }
     }
 
@@ -44,6 +46,19 @@ impl LazyImage {
         self.poll()?;
         self.visible = size.visible;
         self.size = Some(size);
+
+        // Store position for selection indicator regardless of state
+        if size.visible {
+            self.selection_pos = Some((
+                size.pos_x,
+                size.pos_y,
+                size.col_unit,
+                size.row_unit,
+                size.col_margin,
+            ));
+        } else {
+            self.selection_pos = None;
+        }
 
         match &mut self.state {
             LazyImageState::Uninitialized(_) => {}
@@ -78,19 +93,29 @@ impl LazyImage {
         Ok(())
     }
 
-    /// Get selection indicator info (vertices and bind_group) if this image is selected
-    pub fn get_selection_indicator(&self) -> Option<([f32; 24], &BindGroup)> {
+    /// Get selection indicator vertices if this image is selected
+    /// Returns vertices regardless of initialization state
+    pub fn get_selection_indicator_vertices(&self) -> Option<[f32; 24]> {
         if !self.selected {
             return None;
         }
 
-        match &self.state {
-            LazyImageState::Initialized(resp) => resp
-                .renderable_image
-                .get_selection_indicator_vertices()
-                .map(|verts| (verts, &resp.renderable_image.bind_group)),
-            _ => None,
-        }
+        self.selection_pos
+            .map(|(pos_x, pos_y, col_unit, row_unit, col_margin)| {
+                let indicator_size = 0.1; // Size in grid units
+                let margin_offset = col_margin / 2.0;
+                #[rustfmt::skip]
+                let indicator_vertices: [f32; 24] = [
+                    // Position x-y, Texture x-y (texture coords don't matter for inversion)
+                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top left
+                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top right
+                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom left
+                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom left
+                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top right
+                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom right
+                ];
+                indicator_vertices
+            })
     }
 
     fn poll(&mut self) -> Result<()> {
@@ -409,7 +434,6 @@ pub struct RenderableImage {
     pub height: u32,
     mapped: Arc<AtomicBool>,
     waiting_to_resize: Option<ImageResizeSpec>,
-    selection_pos: Option<(f32, f32, f32, f32, f32)>, // (x, y, col_unit, row_unit, col_margin)
 }
 
 impl RenderableImage {
@@ -427,7 +451,6 @@ impl RenderableImage {
             height,
             mapped: Arc::new(AtomicBool::new(false)),
             waiting_to_resize: None,
-            selection_pos: None,
         }
     }
 
@@ -442,26 +465,6 @@ impl RenderableImage {
             renderpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             renderpass.draw(0..6, 0..1);
         }
-    }
-
-    /// Get the vertices for the selection indicator if this image has position info
-    pub fn get_selection_indicator_vertices(&self) -> Option<[f32; 24]> {
-        self.selection_pos
-            .map(|(pos_x, pos_y, col_unit, row_unit, col_margin)| {
-                let indicator_size = 0.1; // Size in grid units
-                let margin_offset = col_margin / 2.0;
-                #[rustfmt::skip]
-                let indicator_vertices: [f32; 24] = [
-                    // Position x-y, Texture x-y (texture coords don't matter for inversion)
-                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top left
-                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top right
-                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom left
-                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom left
-                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top right
-                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom right
-                ];
-                indicator_vertices
-            })
     }
 
     pub fn resize(&mut self, size: &ImageResizeSpec) {
@@ -481,9 +484,6 @@ impl RenderableImage {
         let col_unit = size.col_unit;
         let row_unit = size.row_unit;
         let col_margin = size.col_margin;
-
-        // Store position for selection indicator
-        self.selection_pos = Some((pos_x, pos_y, col_unit, row_unit, col_margin));
 
         let width = self.width;
         let height = self.height;
