@@ -99,8 +99,11 @@ struct State {
     surface: wgpu::Surface<'static>,
     surface_format: TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
+    invert_pipeline: wgpu::RenderPipeline,
+    selection_buffer: wgpu::Buffer,
     images: Vec<LazyImage>,
     rows: u32,
+    selected_idx: usize,
     offset: u64,
 }
 
@@ -202,6 +205,55 @@ impl State {
             cache: None,
         });
 
+        // Create invert pipeline with subtractive blending for color inversion
+        let invert_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Invert Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                    ],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format.add_srgb_suffix(),
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::OneMinusDst,
+                            dst_factor: wgpu::BlendFactor::Zero,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::REPLACE,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -211,6 +263,13 @@ impl State {
             mipmap_filter: wgpu::FilterMode::Linear,
             anisotropy_clamp: 4, // Might not be needed with mipmapping
             ..Default::default()
+        });
+
+        let selection_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Selection indicator buffer"),
+            size: std::mem::size_of::<[f32; 24]>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         let image_loader_service_handle =
@@ -232,8 +291,11 @@ impl State {
             surface,
             surface_format,
             render_pipeline,
+            invert_pipeline,
+            selection_buffer,
             images,
             rows: 3,
+            selected_idx: 0,
             offset: 0,
         };
 
@@ -256,27 +318,42 @@ impl State {
         self.surface.configure(&self.device, &surface_config);
     }
 
+    /// Calculate the number of columns in the current grid
+    fn get_cols(&self) -> u64 {
+        ImageResizeSpec::new(self.size.width, self.size.height, 0, self.rows, 0)
+            .cols
+            .max(1) as u64
+    }
+
+    /// Calculate the row offset needed to ensure selected_idx is visible
+    fn calculate_offset(&self, current_offset: u64) -> u64 {
+        let cols = self.get_cols();
+        let selected_row = (self.selected_idx as u64) / cols;
+
+        // Calculate the current visible row range
+        let first_visible_row = current_offset;
+        let last_visible_row = current_offset + (self.rows as u64).saturating_sub(1);
+
+        // Only scroll if selected row is outside the visible range
+        if selected_row < first_visible_row {
+            // Selected is above visible area, scroll up to show it at the top
+            selected_row
+        } else if selected_row > last_visible_row {
+            // Selected is below visible area, scroll down to show it at the bottom
+            selected_row.saturating_sub((self.rows as u64).saturating_sub(1))
+        } else {
+            // Selected is already visible, don't change offset
+            current_offset
+        }
+    }
+
     fn resize(&mut self, new_size: Option<winit::dpi::PhysicalSize<u32>>) {
         if let Some(new_size) = new_size {
             self.size = new_size;
         }
 
-        let cols = ImageResizeSpec::new(
-            self.size.width,
-            self.size.height,
-            0,
-            self.rows,
-            self.offset as u32,
-        )
-        .cols
-        .max(1) as u64; // HACK avoid div by zero
-
-        let max_offset = (self.images.len() as u64)
-            .div_ceil(cols)
-            .saturating_sub(self.rows as u64);
-        if self.offset > max_offset {
-            self.offset = max_offset;
-        }
+        // Calculate offset to keep selected_idx visible (only scroll if needed)
+        self.offset = self.calculate_offset(self.offset);
 
         let mut slot: u32 = 0;
         self.images.retain_mut(|img| {
@@ -288,6 +365,10 @@ impl State {
                 self.rows,
                 self.offset as u32,
             );
+
+            // Mark as selected if this is the selected index
+            img.selected = slot as usize == self.selected_idx;
+
             if spec.visible {
                 match img.resize(spec) {
                     Ok(()) => {
@@ -340,6 +421,7 @@ impl State {
 
         renderpass.set_pipeline(&self.render_pipeline);
 
+        // Render all images
         let mut was_err = false;
         self.images.retain_mut(|img| {
             if img.visible {
@@ -356,6 +438,19 @@ impl State {
             }
         });
 
+        // Render selection indicator after all images
+        // Find the selected image and render its indicator
+        for img in &self.images {
+            if let Some((vertices, bind_group)) = img.get_selection_indicator() {
+                self.queue.write_buffer(&self.selection_buffer, 0, bytemuck::cast_slice(&vertices));
+                renderpass.set_pipeline(&self.invert_pipeline);
+                renderpass.set_bind_group(0, bind_group, &[]);
+                renderpass.set_vertex_buffer(0, self.selection_buffer.slice(..));
+                renderpass.draw(0..6, 0..1);
+                break; // Only one image should be selected
+            }
+        }
+
         drop(renderpass);
 
         self.queue.submit([encoder.finish()]);
@@ -367,16 +462,37 @@ impl State {
         }
     }
 
-    fn scroll_down(&mut self) {
-        self.offset = self.offset.saturating_add(1);
-        self.resize(None);
-    }
-
-    fn scroll_up(&mut self) {
-        if self.offset != 0 {
-            self.offset = self.offset.saturating_sub(1);
+    fn move_left(&mut self) {
+        if self.selected_idx > 0 {
+            self.selected_idx -= 1;
             self.resize(None);
         }
+    }
+
+    fn move_right(&mut self) {
+        if self.selected_idx + 1 < self.images.len() {
+            self.selected_idx += 1;
+            self.resize(None);
+        }
+    }
+
+    fn move_up(&mut self) {
+        let cols = self.get_cols() as usize;
+        if self.selected_idx >= cols {
+            self.selected_idx -= cols;
+            self.resize(None);
+        }
+    }
+
+    fn move_down(&mut self) {
+        let cols = self.get_cols() as usize;
+        if self.selected_idx + cols < self.images.len() {
+            self.selected_idx += cols;
+        } else if self.selected_idx < self.images.len() - 1 {
+            // Can't move down a full row, so go to the last image
+            self.selected_idx = self.images.len() - 1;
+        }
+        self.resize(None);
     }
 
     fn zoom_in(&mut self) {
@@ -464,11 +580,17 @@ impl ApplicationHandler for App {
                         PhysicalKey::Code(KeyCode::KeyQ | KeyCode::Escape) => {
                             event_loop.exit();
                         }
+                        PhysicalKey::Code(KeyCode::KeyH | KeyCode::ArrowLeft) => {
+                            state.move_left();
+                        }
+                        PhysicalKey::Code(KeyCode::KeyL | KeyCode::ArrowRight) => {
+                            state.move_right();
+                        }
                         PhysicalKey::Code(KeyCode::KeyJ | KeyCode::ArrowDown) => {
-                            state.scroll_down();
+                            state.move_down();
                         }
                         PhysicalKey::Code(KeyCode::KeyK | KeyCode::ArrowUp) => {
-                            state.scroll_up();
+                            state.move_up();
                         }
                         PhysicalKey::Code(KeyCode::Equal) => {
                             if self.shifted {
