@@ -366,6 +366,35 @@ impl State {
             self.resize(None);
         }
     }
+
+    fn scroll_down(&mut self) {
+        self.offset = self.offset.saturating_add(1);
+        self.resize(None);
+    }
+
+    fn scroll_up(&mut self) {
+        if self.offset != 0 {
+            self.offset = self.offset.saturating_sub(1);
+            self.resize(None);
+        }
+    }
+
+    fn zoom_in(&mut self) {
+        self.rows = self.rows.saturating_sub(1).max(1);
+        self.resize(None);
+    }
+
+    fn zoom_out(&mut self) {
+        self.rows = self.rows.saturating_add(1).min(32);
+        self.resize(None);
+    }
+
+    fn reset_zoom(&mut self) {
+        if self.rows != 3 {
+            self.rows = 3;
+            self.resize(None);
+        }
+    }
 }
 
 struct App {
@@ -436,29 +465,20 @@ impl ApplicationHandler for App {
                             event_loop.exit();
                         }
                         PhysicalKey::Code(KeyCode::KeyJ | KeyCode::ArrowDown) => {
-                            state.offset = state.offset.saturating_add(1);
-                            state.resize(None);
+                            state.scroll_down();
                         }
                         PhysicalKey::Code(KeyCode::KeyK | KeyCode::ArrowUp) => {
-                            if state.offset != 0 {
-                                state.offset = state.offset.saturating_sub(1);
-                                state.resize(None);
-                            }
+                            state.scroll_up();
                         }
                         PhysicalKey::Code(KeyCode::Equal) => {
                             if self.shifted {
-                                state.rows = state.rows.saturating_sub(1).max(1);
-                                state.resize(None);
+                                state.zoom_in();
                             } else {
-                                if state.rows != 3 {
-                                    state.rows = 3;
-                                    state.resize(None);
-                                }
+                                state.reset_zoom();
                             }
                         }
                         PhysicalKey::Code(KeyCode::Minus) => {
-                            state.rows = state.rows.saturating_add(1).min(32);
-                            state.resize(None);
+                            state.zoom_out();
                         }
                         _ => {}
                     }
