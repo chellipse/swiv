@@ -14,7 +14,7 @@ bytemuck = { version = "1.23.2", features = ["derive"] }
 clap = { version = "4.5.46", features = ["derive"] }
 crossbeam-channel = "0.5.15"
 env_logger = "0.11.8"
-image = "0.25.6"
+image = { version = "0.25.6", features = ["avif-native"] }
 itertools = "0.14.0"
 lcms2 = "6.1.1"
 lexical-sort = "0.3.1"

@@ -44,6 +44,11 @@ in
 pkgs.mkShell {
   nativeBuildInputs = [
     rust
+    pkgs.pkg-config
+  ];
+
+  buildInputs = [
+    pkgs.dav1d
   ];
 
   LD_LIBRARY_PATH = libPath;

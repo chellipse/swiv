@@ -32,6 +32,14 @@ struct Cli {
     /// How many levels of nesting to traverse if recursion is enabled
     #[arg(long, default_value_t = 16)]
     recursion_limit: u8,
+
+    /// Do not perform a lexical sort over all paths
+    #[arg(long)]
+    no_sort: bool,
+
+    /// Ignore file extension during path filtering
+    #[arg(long)]
+    ignore_ext: bool,
 }
 
 impl Cli {
@@ -43,12 +51,31 @@ impl Cli {
             false => self.target.parent().ok_or(anyhow!("None"))?.to_path_buf(),
         };
 
-        Ok(Self::open_dir(&target, recursion)?
-            .map(|entry| entry.path())
-            .sorted_by(|a, b| {
+        let mut iter: Box<dyn Iterator<Item = _>> =
+            Box::new(Self::open_dir(&target, recursion)?.map(|entry| entry.path()));
+
+        if !self.ignore_ext {
+            // currently we only support formats image-rs supports
+            const EXTENSIONS: &[&str] = &[
+                "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif", "tga", "dds",
+                "farbfeld", "ff", "pnm", "pbm", "pgm", "pam", "ppm", "hdr", "exr", "qoi", "avif",
+            ];
+            iter = Box::new(iter.filter(|path| {
+                path.extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.to_lowercase()) // ignore case
+                    .map(|x| EXTENSIONS.contains(&x.as_str()))
+                    .unwrap_or(false)
+            }));
+        };
+
+        if !self.no_sort {
+            iter = Box::new(iter.sorted_by(|a, b| {
                 lexical_sort::natural_lexical_cmp(&a.to_string_lossy(), &b.to_string_lossy())
-            })
-            .collect())
+            }));
+        };
+
+        Ok(iter.collect())
     }
 
     fn open_dir(
