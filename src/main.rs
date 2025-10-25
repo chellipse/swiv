@@ -133,6 +133,8 @@ struct State {
     rows: u32,
     selected_idx: usize,
     offset: u64,
+    /// used to ensure things are resized after an image removal
+    needs_resize: bool,
 }
 
 impl State {
@@ -384,6 +386,7 @@ impl State {
             rows: 3,
             selected_idx: 0,
             offset: 0,
+            needs_resize: false,
         };
 
         state.configure_surface();
@@ -445,6 +448,10 @@ impl State {
 
     /// Remove images at the specified indices (in reverse order to maintain correct indices)
     fn remove_images_at(&mut self, mut indices: Vec<usize>) {
+        if indices.len() > 0 {
+            self.needs_resize = true;
+        }
+
         // Sort in reverse order
         indices.sort_unstable_by(|a, b| b.cmp(a));
         for idx in indices {
@@ -500,6 +507,13 @@ impl State {
         self.remove_images_at(errors_to_remove);
 
         self.configure_surface();
+    }
+
+    fn resize_if_needed(&mut self) {
+        if self.needs_resize {
+            self.resize(None);
+            self.needs_resize = false;
+        }
     }
 
     fn render(&mut self) -> bool {
@@ -683,6 +697,8 @@ impl ApplicationHandler for App {
                 }
                 // Emits a new redraw requested event.
                 state.window.request_redraw();
+                // will trigger a resize if any images were removed during the render call
+                state.resize_if_needed();
             }
             WindowEvent::Resized(size) => {
                 tracing::debug!("Window Resize: {size:?}");
