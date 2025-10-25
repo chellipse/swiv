@@ -451,7 +451,7 @@ impl State {
                 img.selected = idx == self.selected_idx;
 
                 match img.resize(spec) {
-                    Ok(()) => {},
+                    Ok(()) => {}
                     Err(e) => {
                         log::warn!("{e:?}");
                         errors_to_remove.push(idx);
@@ -509,7 +509,7 @@ impl State {
         for (idx, img) in self.images.iter_mut().enumerate() {
             if idx >= visible_start && idx < visible_end {
                 match img.render(&mut renderpass) {
-                    Ok(()) => {},
+                    Ok(()) => {}
                     Err(e) => {
                         log::warn!("{e:?}");
                         errors_to_remove.push(idx);
@@ -523,7 +523,10 @@ impl State {
 
         // Check if we have no more images to display
         if self.images.is_empty() {
-            eprintln!("{}: no more files to display, aborting", env!("CARGO_PKG_NAME"));
+            eprintln!(
+                "{}: no more files to display, aborting",
+                env!("CARGO_PKG_NAME")
+            );
             return false;
         }
 
