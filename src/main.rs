@@ -357,7 +357,12 @@ impl State {
             ImageLoaderServiceHandle::new(&device, &queue, &bind_group_layout, &sampler, 0);
 
         let paths = cli.get_paths().unwrap();
-        log::info!("Path count: {}", paths.len());
+        tracing::info!("Path count: {}", paths.len());
+        const NO_FIRST_DISPLAYED: usize = 10;
+        tracing::debug!(
+            "First {NO_FIRST_DISPLAYED} paths: {:?}",
+            &paths[..paths.len().min(NO_FIRST_DISPLAYED)]
+        );
 
         let images: Vec<_> = paths
             .into_iter()
@@ -443,7 +448,8 @@ impl State {
         // Sort in reverse order
         indices.sort_unstable_by(|a, b| b.cmp(a));
         for idx in indices {
-            self.images.remove(idx);
+            let img = self.images.remove(idx);
+            tracing::debug!("Removed: {:?}", img.path);
         }
     }
 
@@ -464,7 +470,7 @@ impl State {
         for (idx, img) in self.images.iter_mut().enumerate() {
             if idx >= visible_start && idx < visible_end {
                 let relative_slot = (idx - visible_start) as u32;
-                log::debug!("Resizing: {:?}", img.path);
+                tracing::trace!("Resizing: {:?}", img.path);
 
                 let spec = ImageResizeSpec::new(
                     self.size.width,
@@ -480,7 +486,7 @@ impl State {
                 match img.resize(spec) {
                     Ok(()) => {}
                     Err(e) => {
-                        log::warn!("{e:?}");
+                        tracing::warn!("{e:?}");
                         errors_to_remove.push(idx);
                     }
                 }
@@ -538,7 +544,7 @@ impl State {
                 match img.render(&mut renderpass) {
                     Ok(()) => {}
                     Err(e) => {
-                        log::warn!("{e:?}");
+                        tracing::trace!("{e:?}");
                         errors_to_remove.push(idx);
                     }
                 }
@@ -666,11 +672,10 @@ impl ApplicationHandler for App {
         let state = self.state.as_mut().unwrap();
         match event {
             WindowEvent::CloseRequested => {
-                log::debug!("The close button was pressed; stopping");
+                tracing::debug!("The close button was pressed; stopping");
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                // log::debug!("Redraw");
                 if !state.render() {
                     // No more images to display
                     event_loop.exit();
@@ -680,7 +685,7 @@ impl ApplicationHandler for App {
                 state.window.request_redraw();
             }
             WindowEvent::Resized(size) => {
-                log::debug!("RESIZED: {size:?}");
+                tracing::debug!("Window Resize: {size:?}");
                 // Reconfigures the size of the surface. We do not re-render
                 // here as this event is always followed up by redraw request.
                 state.resize(Some(size));
@@ -734,8 +739,17 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    env_logger::Builder::from_default_env()
-        .format_timestamp_millis()
+    let (stdout, _guard) = tracing_appender::non_blocking(std::io::stdout());
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
+        )
+        .with_writer(stdout)
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
         .init();
 
     let event_loop = EventLoop::new().unwrap();

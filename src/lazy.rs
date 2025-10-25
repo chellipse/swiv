@@ -119,7 +119,7 @@ impl LazyImage {
                     let mut resp = match resp {
                         Ok(resp) => resp,
                         Err(e) => {
-                            let err = Err(anyhow!("{e:?}"));
+                            let err = Err(anyhow!("{e:?} from {:?}", &self.path));
                             self.state = LazyImageState::Error(e);
                             return err;
                         }
@@ -133,7 +133,7 @@ impl LazyImage {
             }
             LazyImageState::Initialized(_) => {}
             LazyImageState::Error(e) => {
-                return Err(anyhow!("{e:?}"));
+                return Err(anyhow!("{e:?} from {:?}", &self.path));
             }
         }
 
@@ -316,7 +316,7 @@ impl ImageLoaderServiceHandle {
             (0, Err(_)) => 1,
             (a, Err(_)) => a.min(4),
         };
-        log::info!("ImageLoaderService parallelism: {parallelism}");
+        tracing::info!("ImageLoaderService parallelism: {parallelism}");
 
         let (sender, receiver) = unbounded::<ImageRequest>();
         let mut handles = Vec::new();
@@ -330,7 +330,7 @@ impl ImageLoaderServiceHandle {
             let handle = thread::spawn(move || loop {
                 match receiver.recv() {
                     Ok(req) => {
-                        log::debug!("{id}:{:?}", req.path);
+                        tracing::debug!("{id}:{:?}", req.path);
                         req.eval(&device, &queue, &layout, &sampler);
                     }
                     Err(_) => break,
@@ -358,7 +358,7 @@ pub struct GenericImage {
 
 impl GenericImage {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
-        log::debug!("Path: {:?}", path.as_ref());
+        tracing::trace!("Loading {:?}", path.as_ref());
 
         let mut decoder = image::ImageReader::open(&path)?.into_decoder()?;
         let icc_profile = decoder.icc_profile()?;
@@ -367,11 +367,10 @@ impl GenericImage {
         const MAX_WIDTH: u32 = 2u32.pow(11);
         const MAX_HEIGHT: u32 = 2u32.pow(10);
         if img.width() > MAX_WIDTH || img.height() > MAX_HEIGHT {
-            log::debug!(
-                "Resize: {}x{} Len {} from {:?}",
+            tracing::trace!(
+                "Resizing {}x{} from {:?}",
                 img.width(),
                 img.height(),
-                img.as_bytes().len(),
                 path.as_ref(),
             );
             img = img.resize(MAX_WIDTH, MAX_HEIGHT, image::imageops::FilterType::Triangle);
@@ -394,11 +393,11 @@ impl GenericImage {
                 lcms2::Intent::Perceptual,
             )?;
 
-            log::debug!("Transforming {:?} via ICC profile.", path.as_ref());
+            tracing::trace!("Transforming {:?} via ICC profile", path.as_ref());
             t.transform_in_place(&mut bytes);
         }
 
-        log::debug!("Finished: {:?}", path.as_ref());
+        tracing::trace!("Finished: {:?}", path.as_ref());
         Ok(Self {
             width,
             height,

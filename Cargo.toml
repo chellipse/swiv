@@ -13,12 +13,13 @@ anyhow = "1.0.99"
 bytemuck = { version = "1.23.2", features = ["derive"] }
 clap = { version = "4.5.46", features = ["derive"] }
 crossbeam-channel = "0.5.15"
-env_logger = "0.11.8"
 image = { version = "0.25.6", features = ["avif-native"] }
 itertools = "0.14.0"
 lcms2 = "6.1.1"
 lexical-sort = "0.3.1"
-log = "0.4.27"
 pollster = "0.4.0"
 wgpu = "26.0.1"
 winit = "0.30.12"
+tracing = "0.1"
+tracing-appender = "0.2.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
