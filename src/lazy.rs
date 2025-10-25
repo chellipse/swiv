@@ -21,7 +21,6 @@ pub struct LazyImage {
     pub state: LazyImageState,
     pub path: PathBuf,
     pub size: Option<ImageResizeSpec>,
-    pub visible: bool,
     pub selected: bool,
     selection_pos: Option<(f32, f32, f32, f32, f32)>, // (x, y, col_unit, row_unit, col_margin)
 }
@@ -36,7 +35,6 @@ impl LazyImage {
             path,
             size,
             state: LazyImageState::Uninitialized(req_sender),
-            visible: false,
             selected: false,
             selection_pos: None,
         }
@@ -44,21 +42,16 @@ impl LazyImage {
 
     pub fn resize(&mut self, size: ImageResizeSpec) -> Result<()> {
         self.poll()?;
-        self.visible = size.visible;
         self.size = Some(size);
 
-        // Store position for selection indicator regardless of state
-        if size.visible {
-            self.selection_pos = Some((
-                size.pos_x,
-                size.pos_y,
-                size.col_unit,
-                size.row_unit,
-                size.col_margin,
-            ));
-        } else {
-            self.selection_pos = None;
-        }
+        // Store position for selection indicator
+        self.selection_pos = Some((
+            size.pos_x,
+            size.pos_y,
+            size.col_unit,
+            size.row_unit,
+            size.col_margin,
+        ));
 
         match &mut self.state {
             LazyImageState::Uninitialized(_) => {}
@@ -170,11 +163,10 @@ pub struct ImageResizeSpec {
     pub col_unit: f32,
     pub col_space: f32,
     pub col_margin: f32,
-    pub visible: bool,
 }
 
 impl ImageResizeSpec {
-    pub fn new(vp_width: u32, vp_height: u32, mut pos: u32, rows: u32, offset: u32) -> Self {
+    pub fn new(vp_width: u32, vp_height: u32, pos: u32, rows: u32, offset: u32) -> Self {
         let row_unit = 2.0 / rows as f32;
 
         let col_space = vp_width as f32 / (vp_height as f32 / rows as f32);
@@ -182,21 +174,13 @@ impl ImageResizeSpec {
         let cols = col_space.trunc() as u32;
         let col_margin = (col_space % 1.0) * col_unit;
 
-        let min_pos = cols * offset;
-        let max_pos = (cols * offset) + (cols * rows);
-
-        let visible = if pos >= min_pos && pos < max_pos {
-            true
-        } else {
-            false
-        };
-
-        pos -= min_pos;
+        // Apply offset to position
+        let adjusted_pos = pos + (cols * offset);
 
         // TODO rework sizing so it works on windows where height > width
         // HACK make these all use checked div/mod so we don't panic on zero
-        let pos_x = pos.checked_rem(cols).unwrap_or(0) as f32;
-        let pos_y = (pos - pos_x as u32).checked_div(cols).unwrap_or(0) as f32;
+        let pos_x = adjusted_pos.checked_rem(cols).unwrap_or(0) as f32;
+        let pos_y = (adjusted_pos - pos_x as u32).checked_div(cols).unwrap_or(0) as f32;
 
         Self {
             vp_width,
@@ -208,7 +192,6 @@ impl ImageResizeSpec {
             col_space,
             col_unit,
             cols,
-            visible,
             pos_x,
             pos_y,
         }
@@ -473,10 +456,6 @@ impl RenderableImage {
             return;
         } else {
             self.waiting_to_resize = None;
-        }
-
-        if !size.visible {
-            return;
         }
 
         let pos_x = size.pos_x;

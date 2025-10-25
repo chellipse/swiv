@@ -402,6 +402,24 @@ impl State {
         }
     }
 
+    /// Calculate the range of visible image indices
+    fn get_visible_range(&self) -> (usize, usize) {
+        let cols = self.get_cols() as usize;
+        let rows = self.rows as usize;
+        let visible_start = (self.offset as usize) * cols;
+        let visible_end = (visible_start + (cols * rows)).min(self.images.len());
+        (visible_start, visible_end)
+    }
+
+    /// Remove images at the specified indices (in reverse order to maintain correct indices)
+    fn remove_images_at(&mut self, mut indices: Vec<usize>) {
+        // Sort in reverse order
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in indices {
+            self.images.remove(idx);
+        }
+    }
+
     fn resize(&mut self, new_size: Option<winit::dpi::PhysicalSize<u32>>) {
         if let Some(new_size) = new_size {
             self.size = new_size;
@@ -410,37 +428,43 @@ impl State {
         // Calculate offset to keep selected_idx visible (only scroll if needed)
         self.offset = self.calculate_offset(self.offset);
 
-        let mut slot: u32 = 0;
-        self.images.retain_mut(|img| {
-            log::debug!("Resizing: {:?}", img.path);
-            let spec = ImageResizeSpec::new(
-                self.size.width,
-                self.size.height,
-                slot,
-                self.rows,
-                self.offset as u32,
-            );
+        // Calculate visible range
+        let (visible_start, visible_end) = self.get_visible_range();
 
-            // Mark as selected if this is the selected index
-            img.selected = slot as usize == self.selected_idx;
+        let mut errors_to_remove = Vec::new();
 
-            if spec.visible {
+        // Only resize visible images
+        for (idx, img) in self.images.iter_mut().enumerate() {
+            if idx >= visible_start && idx < visible_end {
+                let relative_slot = (idx - visible_start) as u32;
+                log::debug!("Resizing: {:?}", img.path);
+
+                let spec = ImageResizeSpec::new(
+                    self.size.width,
+                    self.size.height,
+                    relative_slot,
+                    self.rows,
+                    0, // offset is 0 because we already calculated the visible start
+                );
+
+                // Mark as selected if this is the selected index
+                img.selected = idx == self.selected_idx;
+
                 match img.resize(spec) {
-                    Ok(()) => {
-                        slot += 1;
-                        true
-                    }
+                    Ok(()) => {},
                     Err(e) => {
                         log::warn!("{e:?}");
-                        false
+                        errors_to_remove.push(idx);
                     }
                 }
             } else {
-                slot += 1;
-                img.visible = false;
-                true
+                // Mark as selected even if not visible (for when scrolling)
+                img.selected = idx == self.selected_idx;
             }
-        });
+        }
+
+        // Remove images that had errors
+        self.remove_images_at(errors_to_remove);
 
         self.configure_surface();
     }
@@ -476,22 +500,26 @@ impl State {
 
         renderpass.set_pipeline(&self.render_pipeline);
 
-        // Render all images
-        let mut was_err = false;
-        self.images.retain_mut(|img| {
-            if img.visible {
+        // Calculate visible range
+        let (visible_start, visible_end) = self.get_visible_range();
+
+        let mut errors_to_remove = Vec::new();
+
+        // Render only visible images
+        for (idx, img) in self.images.iter_mut().enumerate() {
+            if idx >= visible_start && idx < visible_end {
                 match img.render(&mut renderpass) {
-                    Ok(()) => true,
+                    Ok(()) => {},
                     Err(e) => {
                         log::warn!("{e:?}");
-                        was_err = true;
-                        false
+                        errors_to_remove.push(idx);
                     }
                 }
-            } else {
-                true
             }
-        });
+        }
+
+        // Remove images that had errors
+        self.remove_images_at(errors_to_remove);
 
         // Check if we have no more images to display
         if self.images.is_empty() {
@@ -518,10 +546,6 @@ impl State {
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         surface_texture.present();
-
-        if was_err {
-            self.resize(None);
-        }
 
         true
     }
