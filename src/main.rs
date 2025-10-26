@@ -1,6 +1,7 @@
 use std::{
     fmt::Debug,
     fs::{self, DirEntry},
+    ops::Mul,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -11,7 +12,7 @@ use itertools::Itertools;
 use wgpu::{Features, TextureFormat, TextureUsages};
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
@@ -19,7 +20,13 @@ use winit::{
 
 mod lazy;
 
-use lazy::{ImageLoaderServiceHandle, ImageResizeSpec, LazyImage};
+use lazy::{ImageLoaderServiceHandle, ImageResizeSpec, LazyImage, SingleImageResizeSpec};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Gallery,
+    SingleImage,
+}
 
 #[derive(Debug, Clone, Parser)]
 struct Cli {
@@ -134,6 +141,16 @@ struct State {
     offset: u64,
     /// used to ensure things are resized after an image removal
     needs_resize: bool,
+    // Display mode
+    mode: Mode,
+    // Single image mode state
+    single_image_zoom: f32,
+    single_image_pan_x: f32,
+    single_image_pan_y: f32,
+    // Mouse drag state
+    mouse_current_pos: Option<(f64, f64)>,
+    // When dragging, this stores the point on the image (in normalized -1 to 1 coords) that was clicked
+    drag_anchor_image_pos: Option<(f32, f32)>,
 }
 
 impl State {
@@ -386,6 +403,12 @@ impl State {
             selected_idx: 0,
             offset: 0,
             needs_resize: false,
+            mode: Mode::Gallery,
+            single_image_zoom: 1.0,
+            single_image_pan_x: 0.0,
+            single_image_pan_y: 0.0,
+            mouse_current_pos: None,
+            drag_anchor_image_pos: None,
         };
 
         state.configure_surface();
@@ -436,6 +459,37 @@ impl State {
         }
     }
 
+    /// Scroll the gallery view by a number of rows
+    fn gallery_scroll(&mut self, row_delta: i64) {
+        let cols = self.get_cols();
+
+        // Calculate max offset (last row that could be at the top)
+        let total_rows = (self.images.len() as u64 + cols - 1) / cols; // Ceiling division
+        let max_offset = total_rows.saturating_sub(self.rows as u64);
+
+        // Apply scroll delta
+        if row_delta > 0 {
+            self.offset = (self.offset + row_delta as u64).min(max_offset);
+        } else if row_delta < 0 {
+            self.offset = self.offset.saturating_sub((-row_delta) as u64);
+        }
+
+        // Ensure selected_idx is within visible range
+        let selected_row = (self.selected_idx as u64) / cols;
+        let first_visible_row = self.offset;
+        let last_visible_row = self.offset + (self.rows as u64).saturating_sub(1);
+
+        if selected_row < first_visible_row {
+            // Selected is above visible area, move it to the first visible row
+            self.selected_idx = (first_visible_row * cols) as usize;
+        } else if selected_row > last_visible_row {
+            // Selected is below visible area, move it to the last visible row
+            self.selected_idx = ((last_visible_row * cols) as usize).min(self.images.len() - 1);
+        }
+
+        self.resize(None);
+    }
+
     /// Calculate the range of visible image indices
     fn get_visible_range(&self) -> (usize, usize) {
         let cols = self.get_cols() as usize;
@@ -459,46 +513,106 @@ impl State {
         }
     }
 
+    /// Calculate pan offsets to keep the drag anchor point under the cursor
+    fn calculate_pan_for_drag(&self) -> (f32, f32) {
+        if let (Some((cursor_x, cursor_y)), Some((anchor_x, anchor_y))) =
+            (self.mouse_current_pos, self.drag_anchor_image_pos)
+        {
+            // Convert cursor position from window coords to normalized device coords (-1 to 1)
+            let cursor_ndc_x = (cursor_x / self.size.width as f64) * 2.0 - 1.0;
+            let cursor_ndc_y = 1.0 - (cursor_y / self.size.height as f64) * 2.0;
+
+            // The pan offset should position the image such that anchor_x/y appears at cursor_ndc_x/y
+            // anchor point in image space + pan = cursor position in NDC
+            // Therefore: pan = cursor_ndc - anchor
+            let pan_x = cursor_ndc_x as f32 - anchor_x;
+            let pan_y = cursor_ndc_y as f32 - anchor_y;
+
+            (pan_x, pan_y)
+        } else {
+            (self.single_image_pan_x, self.single_image_pan_y)
+        }
+    }
+
     fn resize(&mut self, new_size: Option<winit::dpi::PhysicalSize<u32>>) {
         if let Some(new_size) = new_size {
             self.size = new_size;
         }
 
-        // Calculate offset to keep selected_idx visible (only scroll if needed)
-        self.offset = self.calculate_offset(self.offset);
-
-        // Calculate visible range
-        let (visible_start, visible_end) = self.get_visible_range();
-
         let mut errors_to_remove = Vec::new();
 
-        // Only resize visible images
-        for (idx, img) in self.images.iter_mut().enumerate() {
-            if idx >= visible_start && idx < visible_end {
-                let relative_slot = (idx - visible_start) as u32;
-                tracing::trace!("Resizing: {:?}", img.path);
+        match self.mode {
+            Mode::Gallery => {
+                // Calculate offset to keep selected_idx visible (only scroll if needed)
+                self.offset = self.calculate_offset(self.offset);
 
-                let spec = ImageResizeSpec::new(
-                    self.size.width,
-                    self.size.height,
-                    relative_slot,
-                    self.rows,
-                    0, // offset is 0 because we already calculated the visible start
-                );
+                // Calculate visible range
+                let (visible_start, visible_end) = self.get_visible_range();
 
-                // Mark as selected if this is the selected index
-                img.selected = idx == self.selected_idx;
+                // Only resize visible images
+                for (idx, img) in self.images.iter_mut().enumerate() {
+                    if idx >= visible_start && idx < visible_end {
+                        let relative_slot = (idx - visible_start) as u32;
+                        tracing::trace!("Resizing: {:?}", img.path);
 
-                match img.resize(spec) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::warn!("{e:?}");
-                        errors_to_remove.push(idx);
+                        let spec = ImageResizeSpec::new(
+                            self.size.width,
+                            self.size.height,
+                            relative_slot,
+                            self.rows,
+                            0, // offset is 0 because we already calculated the visible start
+                        );
+
+                        // Mark as selected if this is the selected index
+                        img.selected = idx == self.selected_idx;
+
+                        match img.resize(spec) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                tracing::warn!("{e:?}");
+                                errors_to_remove.push(idx);
+                            }
+                        }
+                    } else {
+                        // Mark as selected even if not visible (for when scrolling)
+                        img.selected = idx == self.selected_idx;
                     }
                 }
-            } else {
-                // Mark as selected even if not visible (for when scrolling)
-                img.selected = idx == self.selected_idx;
+            }
+            Mode::SingleImage => {
+                // Calculate pan based on drag state
+                let (pan_x, pan_y) = self.calculate_pan_for_drag();
+
+                // Create spec first to avoid borrow checker issues
+                let spec = SingleImageResizeSpec::new(
+                    self.size.width,
+                    self.size.height,
+                    self.single_image_zoom,
+                    pan_x,
+                    pan_y,
+                );
+
+                // Resize only the selected image for single image mode
+                if let Some(img) = self.images.get_mut(self.selected_idx) {
+                    tracing::trace!("Resizing (SingleImage): {:?}", img.path);
+
+                    img.selected = true;
+
+                    match img.resize_single_image(spec) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::warn!("{e:?}");
+                            errors_to_remove.push(self.selected_idx);
+                        }
+                    }
+                }
+
+                // Mark all other images as not selected
+                for (idx, img) in self.images.iter_mut().enumerate() {
+                    if idx != self.selected_idx {
+                        img.selected = false;
+                    }
+                }
             }
         }
 
@@ -506,6 +620,10 @@ impl State {
         self.remove_images_at(errors_to_remove);
 
         self.configure_surface();
+    }
+
+    fn set_needs_resize(&mut self) {
+        self.needs_resize = true;
     }
 
     fn resize_if_needed(&mut self) {
@@ -546,19 +664,52 @@ impl State {
 
         renderpass.set_pipeline(&self.render_pipeline);
 
-        // Calculate visible range
-        let (visible_start, visible_end) = self.get_visible_range();
-
         let mut errors_to_remove = Vec::new();
 
-        // Render only visible images
-        for (idx, img) in self.images.iter_mut().enumerate() {
-            if idx >= visible_start && idx < visible_end {
-                match img.render(&mut renderpass) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::trace!("{e:?}");
-                        errors_to_remove.push(idx);
+        match self.mode {
+            Mode::Gallery => {
+                // Calculate visible range
+                let (visible_start, visible_end) = self.get_visible_range();
+
+                // Render only visible images
+                for (idx, img) in self.images.iter_mut().enumerate() {
+                    if idx >= visible_start && idx < visible_end {
+                        match img.render(&mut renderpass) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                tracing::trace!("{e:?}");
+                                errors_to_remove.push(idx);
+                            }
+                        }
+                    }
+                }
+
+                // Render selection indicator after all images
+                // Find the selected image and render its indicator
+                for img in &self.images {
+                    if let Some(vertices) = img.get_selection_indicator_vertices() {
+                        self.queue.write_buffer(
+                            &self.selection_buffer,
+                            0,
+                            bytemuck::cast_slice(&vertices),
+                        );
+                        renderpass.set_pipeline(&self.invert_pipeline);
+                        renderpass.set_bind_group(0, &self.selection_bind_group, &[]);
+                        renderpass.set_vertex_buffer(0, self.selection_buffer.slice(..));
+                        renderpass.draw(0..6, 0..1);
+                        break; // Only one image should be selected
+                    }
+                }
+            }
+            Mode::SingleImage => {
+                // Render only the selected image
+                if let Some(img) = self.images.get_mut(self.selected_idx) {
+                    match img.render(&mut renderpass) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::trace!("{e:?}");
+                            errors_to_remove.push(self.selected_idx);
+                        }
                     }
                 }
             }
@@ -576,20 +727,6 @@ impl State {
             return false;
         }
 
-        // Render selection indicator after all images
-        // Find the selected image and render its indicator
-        for img in &self.images {
-            if let Some(vertices) = img.get_selection_indicator_vertices() {
-                self.queue
-                    .write_buffer(&self.selection_buffer, 0, bytemuck::cast_slice(&vertices));
-                renderpass.set_pipeline(&self.invert_pipeline);
-                renderpass.set_bind_group(0, &self.selection_bind_group, &[]);
-                renderpass.set_vertex_buffer(0, self.selection_buffer.slice(..));
-                renderpass.draw(0..6, 0..1);
-                break; // Only one image should be selected
-            }
-        }
-
         drop(renderpass);
 
         self.queue.submit([encoder.finish()]);
@@ -600,6 +737,7 @@ impl State {
     }
 
     fn move_left(&mut self) {
+        self.reset_single_image_pos();
         if self.selected_idx > 0 {
             self.selected_idx -= 1;
             self.resize(None);
@@ -607,6 +745,7 @@ impl State {
     }
 
     fn move_right(&mut self) {
+        self.reset_single_image_pos();
         if self.selected_idx + 1 < self.images.len() {
             self.selected_idx += 1;
             self.resize(None);
@@ -614,6 +753,7 @@ impl State {
     }
 
     fn move_up(&mut self) {
+        self.reset_single_image_pos();
         let cols = self.get_cols() as usize;
         if self.selected_idx >= cols {
             self.selected_idx -= cols;
@@ -622,6 +762,7 @@ impl State {
     }
 
     fn move_down(&mut self) {
+        self.reset_single_image_pos();
         let cols = self.get_cols() as usize;
         if self.selected_idx + cols < self.images.len() {
             self.selected_idx += cols;
@@ -632,20 +773,109 @@ impl State {
         self.resize(None);
     }
 
-    fn zoom_in(&mut self) {
-        self.rows = self.rows.saturating_sub(1).max(1);
+    fn gallery_zoom(&mut self, delta: i32) {
+        match delta {
+            0 => self.rows = 3,
+            1..=i32::MAX => self.rows = self.rows.saturating_sub(delta as u32).max(2),
+            i32::MIN..=-1 => self.rows = self.rows.saturating_add((-delta) as u32).min(32),
+        }
         self.resize(None);
     }
 
-    fn zoom_out(&mut self) {
-        self.rows = self.rows.saturating_add(1).min(32);
+    fn single_image_zoom(&mut self, factor: f32) {
+        let old_zoom = self.single_image_zoom;
+        let new_zoom = if factor == 0.0 {
+            // factor == 0.0 means reset
+            1.0
+        } else {
+            (old_zoom * factor).clamp(0.1, 10.0)
+        };
+
+        // If not dragging, adjust pan to keep center point fixed
+        if self.drag_anchor_image_pos.is_none() {
+            if factor == 0.0 {
+                // Reset pan as well
+                self.single_image_pan_x = 0.0;
+                self.single_image_pan_y = 0.0;
+            } else {
+                let zoom_ratio = new_zoom / old_zoom;
+                self.single_image_pan_x *= zoom_ratio;
+                self.single_image_pan_y *= zoom_ratio;
+            }
+        }
+        // If dragging, the drag anchor will be preserved automatically
+
+        self.single_image_zoom = new_zoom;
         self.resize(None);
     }
 
-    fn reset_zoom(&mut self) {
-        if self.rows != 3 {
-            self.rows = 3;
-            self.resize(None);
+    fn reset_single_image_pos(&mut self) {
+        self.single_image_zoom = 1.0;
+        self.single_image_pan_x = 0.0;
+        self.single_image_pan_y = 0.0;
+    }
+
+    fn toggle_mode(&mut self) {
+        self.mode = match self.mode {
+            Mode::Gallery => {
+                // Reset zoom and pan when entering single image mode
+                self.reset_single_image_pos();
+                Mode::SingleImage
+            }
+            Mode::SingleImage => Mode::Gallery,
+        };
+        self.resize(None);
+    }
+
+    /// Find the image index under the given cursor position in gallery mode
+    /// Returns None if the cursor is not over any image
+    fn get_image_at_cursor(&self, cursor_x: f64, cursor_y: f64) -> Option<usize> {
+        if self.mode != Mode::Gallery {
+            return None;
+        }
+
+        // Convert cursor position to normalized device coordinates (-1 to 1)
+        let ndc_x = (cursor_x / self.size.width as f64) * 2.0 - 1.0;
+        let ndc_y = 1.0 - (cursor_y / self.size.height as f64) * 2.0;
+
+        // Get the grid layout parameters
+        let cols = self.get_cols();
+        let spec = ImageResizeSpec::new(self.size.width, self.size.height, 0, self.rows, 0);
+        let col_unit = spec.col_unit as f64;
+        let row_unit = spec.row_unit as f64;
+        let col_margin = spec.col_margin as f64;
+
+        // Calculate which column and row the cursor is in
+        // Account for the centered margin
+        let adjusted_x = ndc_x - (col_margin / 2.0);
+
+        // Check if cursor is within the grid bounds
+        if adjusted_x < -1.0 || adjusted_x >= -1.0 + (cols as f64 * col_unit) {
+            return None;
+        }
+        if ndc_y > 1.0 || ndc_y < -1.0 {
+            return None;
+        }
+
+        // Calculate grid position
+        let col = ((adjusted_x + 1.0) / col_unit).floor() as i64;
+        let row = ((1.0 - ndc_y) / row_unit).floor() as i64;
+
+        // Convert to absolute grid position (accounting for offset)
+        let abs_row = row + self.offset as i64;
+
+        if col < 0 || row < 0 || abs_row < 0 {
+            return None;
+        }
+
+        // Calculate the image index
+        let idx = (abs_row as u64 * cols + col as u64) as usize;
+
+        // Check if this index is valid
+        if idx < self.images.len() {
+            Some(idx)
+        } else {
+            None
         }
     }
 }
@@ -689,6 +919,9 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
+                // will trigger a resize if any images were removed during the render call
+                state.resize_if_needed();
+
                 if !state.render() {
                     // No more images to display
                     event_loop.exit();
@@ -696,8 +929,6 @@ impl ApplicationHandler for App {
                 }
                 // Emits a new redraw requested event.
                 state.window.request_redraw();
-                // will trigger a resize if any images were removed during the render call
-                state.resize_if_needed();
             }
             WindowEvent::Resized(size) => {
                 tracing::debug!("Window Resize: {size:?}");
@@ -705,7 +936,105 @@ impl ApplicationHandler for App {
                 // here as this event is always followed up by redraw request.
                 state.resize(Some(size));
             }
-            WindowEvent::CursorMoved { .. } => {}
+            WindowEvent::CursorMoved { position, .. } => {
+                state.mouse_current_pos = Some((position.x, position.y));
+
+                if state.mode == Mode::SingleImage && state.drag_anchor_image_pos.is_some() {
+                    // Recalculate position to keep anchor under cursor
+                    state.set_needs_resize();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: button_state,
+                button,
+                ..
+            } => {
+                match button {
+                    MouseButton::Left => {
+                        if button_state == ElementState::Pressed {
+                            match state.mode {
+                                Mode::Gallery => {
+                                    // In gallery mode, select the image under cursor and switch to single image mode
+                                    if let Some((cursor_x, cursor_y)) = state.mouse_current_pos {
+                                        if let Some(idx) =
+                                            state.get_image_at_cursor(cursor_x, cursor_y)
+                                        {
+                                            state.selected_idx = idx;
+                                        }
+                                    }
+                                    state.toggle_mode();
+                                }
+                                Mode::SingleImage => {
+                                    // In single image mode, switch back to gallery
+                                    state.toggle_mode();
+                                }
+                            }
+                        }
+                    }
+                    MouseButton::Right => {
+                        if state.mode == Mode::SingleImage {
+                            match button_state {
+                                ElementState::Pressed => {
+                                    // Calculate which point on the image we clicked
+                                    if let Some((cursor_x, cursor_y)) = state.mouse_current_pos {
+                                        // Convert cursor to NDC
+                                        let cursor_ndc_x =
+                                            (cursor_x / state.size.width as f64) * 2.0 - 1.0;
+                                        let cursor_ndc_y =
+                                            1.0 - (cursor_y / state.size.height as f64) * 2.0;
+
+                                        // The image point that appears at cursor_ndc is: cursor_ndc - pan
+                                        let image_x =
+                                            cursor_ndc_x as f32 - state.single_image_pan_x;
+                                        let image_y =
+                                            cursor_ndc_y as f32 - state.single_image_pan_y;
+
+                                        state.drag_anchor_image_pos = Some((image_x, image_y));
+                                    }
+                                }
+                                ElementState::Released => {
+                                    // Update the stored pan to the current calculated pan
+                                    if state.drag_anchor_image_pos.is_some() {
+                                        let (pan_x, pan_y) = state.calculate_pan_for_drag();
+                                        state.single_image_pan_x = pan_x;
+                                        state.single_image_pan_y = pan_y;
+                                    }
+                                    state.drag_anchor_image_pos = None;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            WindowEvent::MouseWheel {
+                delta,
+                phase: TouchPhase::Moved,
+                ..
+            } => {
+                // tracing::debug!("{delta:?}");
+                match (delta, state.mode) {
+                    (MouseScrollDelta::LineDelta(_, y), Mode::Gallery) => {
+                        // Negative y means scroll down (increase offset)
+                        // Positive y means scroll up (decrease offset)
+                        let scroll_delta = -y as i64;
+                        if scroll_delta != 0 {
+                            state.gallery_scroll(scroll_delta);
+                        }
+                    }
+                    (MouseScrollDelta::PixelDelta(pos), Mode::Gallery) => {
+                        // Convert pixel delta to rows (assuming ~20 pixels per row)
+                        let scroll_delta = (-pos.y / 20.0).round() as i64;
+                        if scroll_delta != 0 {
+                            state.gallery_scroll(scroll_delta);
+                        }
+                    }
+                    (MouseScrollDelta::LineDelta(_, y), Mode::SingleImage) => {
+                        state.single_image_zoom(1.0 + y.mul(0.2));
+                    }
+                    (MouseScrollDelta::PixelDelta(_), Mode::SingleImage) => {}
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 match event.physical_key {
                     PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight) => {
@@ -722,6 +1051,9 @@ impl ApplicationHandler for App {
                         PhysicalKey::Code(KeyCode::KeyQ | KeyCode::Escape) => {
                             event_loop.exit();
                         }
+                        PhysicalKey::Code(KeyCode::Enter) => {
+                            state.toggle_mode();
+                        }
                         PhysicalKey::Code(KeyCode::KeyH | KeyCode::ArrowLeft) => {
                             state.move_left();
                         }
@@ -736,14 +1068,21 @@ impl ApplicationHandler for App {
                         }
                         PhysicalKey::Code(KeyCode::Equal) => {
                             if self.shifted {
-                                state.zoom_in();
+                                match state.mode {
+                                    Mode::Gallery => state.gallery_zoom(1),
+                                    Mode::SingleImage => state.single_image_zoom(1.2),
+                                }
                             } else {
-                                state.reset_zoom();
+                                match state.mode {
+                                    Mode::Gallery => state.gallery_zoom(0),
+                                    Mode::SingleImage => state.single_image_zoom(0.0),
+                                }
                             }
                         }
-                        PhysicalKey::Code(KeyCode::Minus) => {
-                            state.zoom_out();
-                        }
+                        PhysicalKey::Code(KeyCode::Minus) => match state.mode {
+                            Mode::Gallery => state.gallery_zoom(-1),
+                            Mode::SingleImage => state.single_image_zoom(1.0 / 1.2),
+                        },
                         _ => {}
                     }
                 }

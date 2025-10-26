@@ -20,7 +20,7 @@ use wgpu::{
 pub struct LazyImage {
     pub state: LazyImageState,
     pub path: PathBuf,
-    pub size: Option<ImageResizeSpec>,
+    pub size: Option<ResizeSpec>,
     pub selected: bool,
     selection_pos: Option<(f32, f32, f32, f32, f32)>, // (x, y, col_unit, row_unit, col_margin)
 }
@@ -28,7 +28,7 @@ pub struct LazyImage {
 impl LazyImage {
     pub fn new(
         path: PathBuf,
-        size: Option<ImageResizeSpec>,
+        size: Option<ResizeSpec>,
         req_sender: Sender<ImageRequest>,
     ) -> Self {
         Self {
@@ -42,7 +42,7 @@ impl LazyImage {
 
     pub fn resize(&mut self, size: ImageResizeSpec) -> Result<()> {
         self.poll()?;
-        self.size = Some(size);
+        self.size = Some(ResizeSpec::Gallery(size));
 
         // Store position for selection indicator
         self.selection_pos = Some((
@@ -57,7 +57,26 @@ impl LazyImage {
             LazyImageState::Uninitialized(_) => {}
             LazyImageState::Requested(_) => {}
             LazyImageState::Initialized(img) => {
-                img.renderable_image.resize(self.size.as_ref().unwrap());
+                img.renderable_image.resize(&size);
+            }
+            LazyImageState::Error(_) => {}
+        }
+
+        Ok(())
+    }
+
+    pub fn resize_single_image(&mut self, spec: SingleImageResizeSpec) -> Result<()> {
+        self.poll()?;
+        self.size = Some(ResizeSpec::SingleImage(spec));
+
+        // No selection indicator in single image mode
+        self.selection_pos = None;
+
+        match &mut self.state {
+            LazyImageState::Uninitialized(_) => {}
+            LazyImageState::Requested(_) => {}
+            LazyImageState::Initialized(img) => {
+                img.renderable_image.resize_single_image(&spec);
             }
             LazyImageState::Error(_) => {}
         }
@@ -126,7 +145,14 @@ impl LazyImage {
                     };
 
                     if let Some(size) = &self.size {
-                        resp.renderable_image.resize(size);
+                        match size {
+                            ResizeSpec::Gallery(spec) => {
+                                resp.renderable_image.resize(spec);
+                            }
+                            ResizeSpec::SingleImage(spec) => {
+                                resp.renderable_image.resize_single_image(spec);
+                            }
+                        }
                     }
                     self.state = LazyImageState::Initialized(resp);
                 }
@@ -149,6 +175,12 @@ pub enum LazyImageState {
     Error(anyhow::Error),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ResizeSpec {
+    Gallery(ImageResizeSpec),
+    SingleImage(SingleImageResizeSpec),
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct ImageResizeSpec {
@@ -163,6 +195,16 @@ pub struct ImageResizeSpec {
     pub col_unit: f32,
     pub col_space: f32,
     pub col_margin: f32,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct SingleImageResizeSpec {
+    pub vp_width: u32,
+    pub vp_height: u32,
+    pub zoom: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
 }
 
 impl ImageResizeSpec {
@@ -194,6 +236,18 @@ impl ImageResizeSpec {
             cols,
             pos_x,
             pos_y,
+        }
+    }
+}
+
+impl SingleImageResizeSpec {
+    pub fn new(vp_width: u32, vp_height: u32, zoom: f32, pan_x: f32, pan_y: f32) -> Self {
+        Self {
+            vp_width,
+            vp_height,
+            zoom,
+            pan_x,
+            pan_y,
         }
     }
 }
@@ -364,8 +418,8 @@ impl GenericImage {
         let icc_profile = decoder.icc_profile()?;
         let mut img = DynamicImage::from_decoder(decoder)?;
 
-        const MAX_WIDTH: u32 = 2u32.pow(11);
-        const MAX_HEIGHT: u32 = 2u32.pow(10);
+        const MAX_WIDTH: u32 = 2u32.pow(12);
+        const MAX_HEIGHT: u32 = 2u32.pow(11);
         if img.width() > MAX_WIDTH || img.height() > MAX_HEIGHT {
             tracing::trace!(
                 "Resizing {}x{} from {:?}",
@@ -513,6 +567,74 @@ impl RenderableImage {
                         }
                         _ => {}
                     }
+
+                    let mut view = capturable.get_mapped_range_mut(..);
+                    let floats: &mut [f32] = bytemuck::cast_slice_mut(&mut view);
+                    floats.copy_from_slice(&vertices[..]);
+                    drop(view);
+                    capturable.unmap();
+                    is_mapped.store(false, Ordering::Release);
+                }
+            });
+    }
+
+    pub fn resize_single_image(&mut self, spec: &SingleImageResizeSpec) {
+        if self.mapped.load(Ordering::Acquire) {
+            // Can't handle waiting for single image resize, just return
+            return;
+        }
+
+        let zoom = spec.zoom;
+        let pan_x = spec.pan_x;
+        let pan_y = spec.pan_y;
+        let vp_width = spec.vp_width;
+        let vp_height = spec.vp_height;
+
+        let width = self.width;
+        let height = self.height;
+
+        let capturable = self.vertex_buffer.clone();
+        self.mapped.store(true, Ordering::Release);
+        let is_mapped = self.mapped.clone();
+        self.vertex_buffer
+            .map_async(wgpu::MapMode::Write, .., move |result| {
+                if result.is_ok() {
+                    // Calculate aspect ratios
+                    let image_aspect = width as f32 / height as f32;
+                    let viewport_aspect = vp_width as f32 / vp_height as f32;
+
+                    // Determine which dimension constrains the image
+                    // We want the image to fit within the viewport at 1.0 zoom
+                    let (base_width, base_height) = if image_aspect > viewport_aspect {
+                        // Image is wider relative to viewport - width fills the screen
+                        // Height is constrained by aspect ratio
+                        (2.0, 2.0 / image_aspect * viewport_aspect)
+                    } else {
+                        // Image is taller relative to viewport - height fills the screen
+                        // Width is constrained by aspect ratio
+                        (2.0 * image_aspect / viewport_aspect, 2.0)
+                    };
+
+                    // Apply zoom
+                    let final_width = base_width * zoom;
+                    let final_height = base_height * zoom;
+
+                    // Center the image and apply pan offsets
+                    let left = -final_width / 2.0 + pan_x;
+                    let right = final_width / 2.0 + pan_x;
+                    let top = final_height / 2.0 + pan_y;
+                    let bottom = -final_height / 2.0 + pan_y;
+
+                    #[rustfmt::skip]
+                    let vertices: [f32; 24] = [
+                        // Position x-y Texture x-y
+                        left, bottom, 0.0, 1.0,   // Bottom left
+                        right, bottom, 1.0, 1.0,  // Bottom right
+                        left, top, 0.0, 0.0,      // Top left
+                        left, top, 0.0, 0.0,      // Top left
+                        right, bottom, 1.0, 1.0,  // Bottom right
+                        right, top, 1.0, 0.0,     // Top right
+                    ];
 
                     let mut view = capturable.get_mapped_range_mut(..);
                     let floats: &mut [f32] = bytemuck::cast_slice_mut(&mut view);
