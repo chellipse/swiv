@@ -86,8 +86,10 @@ impl Cli {
             fs::read_dir(dir.as_ref())?
                 .flatten()
                 .flat_map(move |entry| {
-                    let ft = entry
-                        .metadata()
+                    let path = entry.path();
+
+                    // so we traverse symbolic links
+                    let ft = std::fs::metadata(&path)
                         .expect("Failed to get metadata")
                         .file_type();
 
@@ -98,14 +100,11 @@ impl Cli {
                     }
 
                     if recursion > 0 && ft.is_dir() {
-                        // if let Some(name) = path.file_name() {
-                        //     if name.as_encoded_bytes().get(0) != Some(&b'.') {
-                        //         return Self::open_dir(path, recursion.saturating_sub(1)).ok();
-                        //     }
-                        // }
-                        return Self::open_dir(entry.path(), recursion.saturating_sub(1)).ok();
+                        return Self::open_dir(path, recursion.saturating_sub(1)).ok();
                     }
 
+                    // TODO write a recursive func which will traverse a set
+                    // number of symbolic links
                     if ft.is_symlink() {
                         return None;
                     }
