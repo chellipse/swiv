@@ -8,6 +8,9 @@ debug = true
 opt-level = 3
 strip = false
 
+[profile.dev.package.tikv-jemalloc-sys]
+opt-level = 3
+
 [dependencies]
 anyhow = "1.0.99"
 bytemuck = { version = "1.23.2", features = ["derive"] }
@@ -24,3 +27,4 @@ tracing = "0.1"
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sysinfo = "0.37.2"
+tikv-jemallocator = "0.6.1"

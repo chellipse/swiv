@@ -143,3 +143,6 @@ fn main() {
     let mut app = App::new(|| Cli::parse().get_paths().unwrap());
     event_loop.run_app(&mut app).unwrap();
 }
+
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
