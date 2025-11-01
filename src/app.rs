@@ -1,5 +1,5 @@
 use std::{
-    ops::{Add, Sub},
+    ops::*,
     path::PathBuf,
     sync::{Arc, LazyLock},
 };
@@ -88,6 +88,7 @@ pub struct App {
     state: Option<State>,
     images: Vec<LazyImage>,
     image_loader_service: ImageLoaderService,
+    sys: sysinfo::System,
 
     /// Store the state from it so it can be accessed by methods triggered
     /// from [`Keymap::apply`] calls
@@ -142,6 +143,8 @@ impl App {
             exiting = true;
         }
 
+        let sys = sysinfo::System::new_all();
+
         Self {
             state: None,
             images,
@@ -157,6 +160,7 @@ impl App {
             cursor_idx: 0,
             row_offset: 0,
             exiting,
+            sys,
         }
     }
 
@@ -329,6 +333,30 @@ impl App {
 
     fn resize_fresh_images(&mut self) {
         let paths = self.image_loader_service.completed();
+
+        if paths.len() > 0 {
+            self.sys.refresh_memory();
+
+            let available = self.sys.available_memory();
+            let total = self.sys.total_memory();
+            let available_pct = (available as f64 / total as f64) * 100.0;
+            tracing::info!("Mem Avail: {} kB ({:.1}%)", available, available_pct);
+
+            match available {
+                x if x < 2u64 * 10u64.pow(9) => {
+                    tracing::error!(
+                        "Low memory! Only {} MB available. exiting...",
+                        available / 10u64.pow(6)
+                    );
+
+                    self.exiting = true;
+                }
+                x if x < 4u64 * 10u64.pow(9) => {
+                    tracing::warn!("Low memory! Only {} MB available", available / 10u64.pow(6));
+                }
+                _ => {}
+            }
+        }
 
         let err_paths: Vec<_> = paths
             .clone()
