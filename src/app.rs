@@ -129,7 +129,7 @@ impl App {
         const NO_FIRST_DISPLAYED: usize = 10;
         tracing::debug!(
             "First {NO_FIRST_DISPLAYED} paths: {:?}",
-            &paths[..paths.len().sub(1).min(NO_FIRST_DISPLAYED)]
+            &paths[..paths.len().saturating_sub(1).min(NO_FIRST_DISPLAYED)]
         );
 
         let images: Vec<_> = paths
