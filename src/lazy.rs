@@ -1,6 +1,9 @@
 use std::{
-    ops::Add,
+    cell::RefCell,
+    marker::PhantomData,
+    ops::{Div, Rem},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -18,338 +21,91 @@ use wgpu::{
 
 #[derive(Debug)]
 pub struct LazyImage {
-    pub state: LazyImageState,
-    pub path: PathBuf,
-    pub size: Option<ResizeSpec>,
-    pub selected: bool,
-    selection_pos: Option<(f32, f32, f32, f32, f32)>, // (x, y, col_unit, row_unit, col_margin)
-}
-
-impl LazyImage {
-    pub fn new(
-        path: PathBuf,
-        size: Option<ResizeSpec>,
-        req_sender: Sender<ImageRequest>,
-    ) -> Self {
-        Self {
-            path,
-            size,
-            state: LazyImageState::Uninitialized(req_sender),
-            selected: false,
-            selection_pos: None,
-        }
-    }
-
-    pub fn resize(&mut self, size: ImageResizeSpec) -> Result<()> {
-        self.poll()?;
-        self.size = Some(ResizeSpec::Gallery(size));
-
-        // Store position for selection indicator
-        self.selection_pos = Some((
-            size.pos_x,
-            size.pos_y,
-            size.col_unit,
-            size.row_unit,
-            size.col_margin,
-        ));
-
-        match &mut self.state {
-            LazyImageState::Uninitialized(_) => {}
-            LazyImageState::Requested(_) => {}
-            LazyImageState::Initialized(img) => {
-                img.renderable_image.resize(&size);
-            }
-            LazyImageState::Error(_) => {}
-        }
-
-        Ok(())
-    }
-
-    pub fn resize_single_image(&mut self, spec: SingleImageResizeSpec) -> Result<()> {
-        self.poll()?;
-        self.size = Some(ResizeSpec::SingleImage(spec));
-
-        // No selection indicator in single image mode
-        self.selection_pos = None;
-
-        match &mut self.state {
-            LazyImageState::Uninitialized(_) => {}
-            LazyImageState::Requested(_) => {}
-            LazyImageState::Initialized(img) => {
-                img.renderable_image.resize_single_image(&spec);
-            }
-            LazyImageState::Error(_) => {}
-        }
-
-        Ok(())
-    }
-
-    pub fn render(&mut self, renderpass: &mut RenderPass) -> Result<()> {
-        self.poll()?;
-
-        match &mut self.state {
-            LazyImageState::Uninitialized(sender) => {
-                let (response_channel, receiver) = unbounded();
-                sender
-                    .send(ImageRequest::new(response_channel, self.path.clone()))
-                    .unwrap();
-                self.state = LazyImageState::Requested(receiver);
-            }
-            LazyImageState::Requested(_) => {}
-            LazyImageState::Initialized(resp) => {
-                resp.renderable_image.render(renderpass);
-            }
-            LazyImageState::Error(_) => unreachable!(),
-        }
-
-        Ok(())
-    }
-
-    /// Get selection indicator vertices if this image is selected
-    /// Returns vertices regardless of initialization state
-    pub fn get_selection_indicator_vertices(&self) -> Option<[f32; 24]> {
-        if !self.selected {
-            return None;
-        }
-
-        self.selection_pos
-            .map(|(pos_x, pos_y, col_unit, row_unit, col_margin)| {
-                let indicator_size = 0.1; // Size in grid units
-                let margin_offset = col_margin / 2.0;
-                #[rustfmt::skip]
-                let indicator_vertices: [f32; 24] = [
-                    // Position x-y, Texture x-y (texture coords don't matter for inversion)
-                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top left
-                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top right
-                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom left
-                    -1.0 + margin_offset + (pos_x * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom left
-                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit), 0.5, 0.5, // Top right
-                    -1.0 + margin_offset + (pos_x * col_unit) + (indicator_size * col_unit), 1.0 - (pos_y * row_unit) - (indicator_size * row_unit), 0.5, 0.5, // Bottom right
-                ];
-                indicator_vertices
-            })
-    }
-
-    fn poll(&mut self) -> Result<()> {
-        match &self.state {
-            LazyImageState::Uninitialized(_) => {}
-            LazyImageState::Requested(receiver) => {
-                if let Ok(resp) = receiver.try_recv() {
-                    let mut resp = match resp {
-                        Ok(resp) => resp,
-                        Err(e) => {
-                            let err = Err(anyhow!("{e:?} from {:?}", &self.path));
-                            self.state = LazyImageState::Error(e);
-                            return err;
-                        }
-                    };
-
-                    if let Some(size) = &self.size {
-                        match size {
-                            ResizeSpec::Gallery(spec) => {
-                                resp.renderable_image.resize(spec);
-                            }
-                            ResizeSpec::SingleImage(spec) => {
-                                resp.renderable_image.resize_single_image(spec);
-                            }
-                        }
-                    }
-                    self.state = LazyImageState::Initialized(resp);
-                }
-            }
-            LazyImageState::Initialized(_) => {}
-            LazyImageState::Error(e) => {
-                return Err(anyhow!("{e:?} from {:?}", &self.path));
-            }
-        }
-
-        Ok(())
-    }
+    state: RefCell<LazyImageState>,
+    path: PathBuf,
+    _not_send: PhantomData<*const ()>, // Makes the type !Send
 }
 
 #[derive(Debug)]
-pub enum LazyImageState {
+enum LazyImageState {
     Uninitialized(Sender<ImageRequest>),
-    Requested(Receiver<Result<ImageResponse>>),
-    Initialized(ImageResponse),
+    Requested(Receiver<Result<GenericImage>>),
+    Initialized(Rc<GenericImage>),
     Error(anyhow::Error),
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum ResizeSpec {
-    Gallery(ImageResizeSpec),
-    SingleImage(SingleImageResizeSpec),
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-pub struct ImageResizeSpec {
-    pub vp_width: u32,
-    pub vp_height: u32,
-    pub pos: u32,
-    pub pos_x: f32,
-    pub pos_y: f32,
-    pub rows: u32,
-    pub cols: u32,
-    pub row_unit: f32,
-    pub col_unit: f32,
-    pub col_space: f32,
-    pub col_margin: f32,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-pub struct SingleImageResizeSpec {
-    pub vp_width: u32,
-    pub vp_height: u32,
-    pub zoom: f32,
-    pub pan_x: f32,
-    pub pan_y: f32,
-}
-
-impl ImageResizeSpec {
-    pub fn new(vp_width: u32, vp_height: u32, pos: u32, rows: u32, offset: u32) -> Self {
-        let row_unit = 2.0 / rows as f32;
-
-        let col_space = vp_width as f32 / (vp_height as f32 / rows as f32);
-        let col_unit = 2.0 / col_space;
-        let cols = col_space.trunc() as u32;
-        let col_margin = (col_space % 1.0) * col_unit;
-
-        // Apply offset to position
-        let adjusted_pos = pos + (cols * offset);
-
-        // TODO rework sizing so it works on windows where height > width
-        // HACK make these all use checked div/mod so we don't panic on zero
-        let pos_x = adjusted_pos.checked_rem(cols).unwrap_or(0) as f32;
-        let pos_y = (adjusted_pos - pos_x as u32).checked_div(cols).unwrap_or(0) as f32;
-
+impl LazyImage {
+    pub fn new(path: PathBuf, req_sender: Sender<ImageRequest>) -> Self {
         Self {
-            vp_width,
-            vp_height,
-            pos,
-            rows,
-            row_unit,
-            col_margin,
-            col_space,
-            col_unit,
-            cols,
-            pos_x,
-            pos_y,
+            path,
+            state: RefCell::new(LazyImageState::Uninitialized(req_sender)),
+            _not_send: PhantomData,
         }
     }
-}
 
-impl SingleImageResizeSpec {
-    pub fn new(vp_width: u32, vp_height: u32, zoom: f32, pan_x: f32, pan_y: f32) -> Self {
-        Self {
-            vp_width,
-            vp_height,
-            zoom,
-            pan_x,
-            pan_y,
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn get(&self) -> Option<Result<Rc<GenericImage>>> {
+        // Transition state if needed
+        {
+            let mut state = self.state.borrow_mut();
+            match &*state {
+                LazyImageState::Uninitialized(sender) => {
+                    let (response_channel, receiver) = unbounded();
+                    sender
+                        .send(ImageRequest::new(response_channel, self.path.clone()))
+                        .unwrap();
+                    *state = LazyImageState::Requested(receiver);
+                }
+                LazyImageState::Requested(receiver) => {
+                    if let Ok(resp) = receiver.try_recv() {
+                        match resp {
+                            Ok(resp) => {
+                                *state = LazyImageState::Initialized(Rc::new(resp));
+                            }
+                            Err(e) => {
+                                *state = LazyImageState::Error(e);
+                            }
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Return result
+        let state = self.state.borrow();
+        match &*state {
+            LazyImageState::Initialized(result) => Some(Ok(Rc::clone(result))),
+            LazyImageState::Error(e) => Some(Err(anyhow!("{e:?} from {:?}", &self.path))),
+            _ => None,
         }
     }
 }
 
 pub struct ImageRequest {
-    pub response_channel: Sender<Result<ImageResponse>>,
+    pub response_channel: Sender<Result<GenericImage>>,
     pub path: PathBuf,
 }
 
 impl ImageRequest {
-    pub fn new(response_channel: Sender<Result<ImageResponse>>, path: PathBuf) -> Self {
+    pub fn new(response_channel: Sender<Result<GenericImage>>, path: PathBuf) -> Self {
         Self {
             response_channel,
             path,
         }
     }
 
-    pub fn eval(
-        self,
-        device: &Device,
-        queue: &Queue,
-        bind_group_layout: &BindGroupLayout,
-        sampler: &Sampler,
-    ) {
+    pub fn eval(self) {
         self.response_channel
-            .send(self.eval_inner(device, queue, bind_group_layout, sampler))
+            .send(GenericImage::new(&self.path))
             .unwrap();
-    }
-
-    pub fn eval_inner(
-        &self,
-        device: &Device,
-        queue: &Queue,
-        bind_group_layout: &BindGroupLayout,
-        sampler: &Sampler,
-    ) -> Result<ImageResponse> {
-        let img = GenericImage::new(&self.path)?;
-
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("eval_inner texture"),
-            size: wgpu::Extent3d {
-                width: img.width,
-                height: img.height,
-                depth_or_array_layers: 1,
-            },
-            // TODO add/try mipmapping
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: img.format,
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-            label: Some("eval_inner bind group"),
-        });
-
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &img.bytes,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(img.width * img.pixel_width), // Assuming RGBA
-                rows_per_image: Some(img.height),
-            },
-            wgpu::Extent3d {
-                width: img.width,
-                height: img.height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        let renderable_image = RenderableImage::new(&device, bind_group, img.width, img.height);
-
-        Ok(ImageResponse { renderable_image })
     }
 }
 
 #[derive(Debug)]
-pub struct ImageResponse {
-    renderable_image: RenderableImage,
-}
-
 pub struct ImageLoaderServiceHandle {
     sender: Sender<ImageRequest>,
     #[allow(dead_code)]
@@ -357,35 +113,28 @@ pub struct ImageLoaderServiceHandle {
 }
 
 impl ImageLoaderServiceHandle {
-    pub fn new(
-        device: &Device,
-        queue: &Queue,
-        layout: &BindGroupLayout,
-        sampler: &Sampler,
-        parallelism: usize,
-    ) -> Self {
+    const MIN_PAR: usize = 2;
+    const MAX_PAR: usize = 16;
+
+    pub fn new(parallelism: usize) -> Self {
         let parallelism = match (parallelism, thread::available_parallelism()) {
-            (0, Ok(b)) => b.get().min(4),
-            (a, Ok(b)) => a.min(b.get()).min(4),
-            (0, Err(_)) => 1,
-            (a, Err(_)) => a.min(4),
+            (0, Ok(b)) => b.get(),
+            (0, Err(_)) => Self::MIN_PAR,
+            (a, _) => a,
         };
+        let parallelism = parallelism.min(Self::MIN_PAR).max(Self::MAX_PAR);
         tracing::info!("ImageLoaderService parallelism: {parallelism}");
 
         let (sender, receiver) = unbounded::<ImageRequest>();
         let mut handles = Vec::new();
         for id in 0..parallelism {
             let receiver = receiver.clone();
-            let device = device.clone();
-            let queue = queue.clone();
-            let layout = layout.clone();
-            let sampler = sampler.clone();
 
             let handle = thread::spawn(move || loop {
                 match receiver.recv() {
                     Ok(req) => {
-                        tracing::debug!("{id}:{:?}", req.path);
-                        req.eval(&device, &queue, &layout, &sampler);
+                        tracing::trace!("Request on {id}:{:?}", req.path);
+                        req.eval();
                     }
                     Err(_) => break,
                 };
@@ -418,8 +167,8 @@ impl GenericImage {
         let icc_profile = decoder.icc_profile()?;
         let mut img = DynamicImage::from_decoder(decoder)?;
 
-        const MAX_WIDTH: u32 = 2u32.pow(12);
-        const MAX_HEIGHT: u32 = 2u32.pow(11);
+        const MAX_WIDTH: u32 = 3840;
+        const MAX_HEIGHT: u32 = 2160;
         if img.width() > MAX_WIDTH || img.height() > MAX_HEIGHT {
             tracing::trace!(
                 "Resizing {}x{} from {:?}",
@@ -464,185 +213,294 @@ impl GenericImage {
 
 #[derive(Debug)]
 pub struct RenderableImage {
-    pub bind_group: BindGroup,
-    pub vertex_buffer: Buffer,
-    pub width: u32,
-    pub height: u32,
+    bind_group: BindGroup,
+    vertex_buffer: Option<Buffer>,
+    device: Device,
+    width: u32,
+    height: u32,
     mapped: Arc<AtomicBool>,
-    waiting_to_resize: Option<ImageResizeSpec>,
+    waiting_to_resize: Option<Vertices>,
 }
 
 impl RenderableImage {
-    pub fn new(device: &Device, bind_group: BindGroup, width: u32, height: u32) -> Self {
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("RenderableImage vertex buffer"),
-            contents: bytemuck::cast_slice(&[0.0f32; 6 * 4]),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::MAP_WRITE,
+    /// Creates a new RenderableImage from a GenericImage, uploading it to the GPU.
+    /// This packages all GPU state needed to render the image.
+    /// The vertex buffer is lazily initialized on the first resize.
+    pub fn new(
+        img: &GenericImage,
+        device: &Device,
+        queue: &Queue,
+        bind_group_layout: &BindGroupLayout,
+        sampler: &Sampler,
+    ) -> Self {
+        // Create GPU texture from the image data
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("RenderableImage texture"),
+            size: wgpu::Extent3d {
+                width: img.width,
+                height: img.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: img.format,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
         });
+
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create bind group that associates the texture with the shader
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+            label: Some("RenderableImage bind group"),
+        });
+
+        // Upload image data to GPU
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img.bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(img.width * img.pixel_width),
+                rows_per_image: Some(img.height),
+            },
+            wgpu::Extent3d {
+                width: img.width,
+                height: img.height,
+                depth_or_array_layers: 1,
+            },
+        );
 
         Self {
             bind_group,
-            vertex_buffer,
-            width,
-            height,
+            vertex_buffer: None,
+            device: device.clone(),
+            width: img.width,
+            height: img.height,
             mapped: Arc::new(AtomicBool::new(false)),
             waiting_to_resize: None,
         }
     }
 
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
     pub fn render(&mut self, renderpass: &mut RenderPass) {
-        if let Some(size) = self.waiting_to_resize {
-            self.resize(&size);
+        if let Some(func) = std::mem::replace(&mut self.waiting_to_resize, None) {
+            self.resize(func);
             return;
         }
 
-        if !self.mapped.load(Ordering::Acquire) {
-            renderpass.set_bind_group(0, &self.bind_group, &[]);
-            renderpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            renderpass.draw(0..6, 0..1);
+        // Only render if vertex buffer is initialized
+        if let Some(vertex_buffer) = &self.vertex_buffer {
+            if !self.mapped.load(Ordering::Acquire) {
+                renderpass.set_bind_group(0, &self.bind_group, &[]);
+                renderpass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                renderpass.draw(0..6, 0..1);
+            }
         }
     }
 
-    pub fn resize(&mut self, size: &ImageResizeSpec) {
+    pub fn resize(&mut self, vertices: Vertices) {
+        // tracing::debug!("{vertices:?}");
+        // Initialize vertex buffer on first resize if not already created
+        if self.vertex_buffer.is_none() {
+            self.vertex_buffer = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("RenderableImage vertex buffer"),
+                    contents: bytemuck::cast_slice(&vertices.finish()),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::MAP_WRITE,
+                },
+            ));
+            return;
+        }
+
         if self.mapped.load(Ordering::Acquire) {
-            self.waiting_to_resize = Some(*size);
+            self.waiting_to_resize = Some(vertices);
             return;
         } else {
             self.waiting_to_resize = None;
         }
 
-        let pos_x = size.pos_x;
-        let pos_y = size.pos_y;
-        let col_unit = size.col_unit;
-        let row_unit = size.row_unit;
-        let col_margin = size.col_margin;
-
-        let width = self.width;
-        let height = self.height;
-
-        let capturable = self.vertex_buffer.clone();
+        let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
+        let capturable = vertex_buffer.clone();
         self.mapped.store(true, Ordering::Release);
         let is_mapped = self.mapped.clone();
-        self.vertex_buffer
-            .map_async(wgpu::MapMode::Write, .., move |result| {
-                if result.is_ok() {
-                    #[rustfmt::skip]
-                    let mut vertices: [f32; 24] = [
-                        // Position x-y Texture x-y
-                        -1.0 + (pos_x * col_unit), 1.0 - (pos_y.add(1.0) * row_unit), 0.0, 1.0, // Bottom left
-                        -1.0 + (pos_x.add(1.0) * col_unit), 1.0 - (pos_y.add(1.0) * row_unit), 1.0, 1.0, // Bottom right
-                        -1.0 + (pos_x * col_unit), 1.0 - (pos_y * row_unit), 0.0, 0.0, // Top left
-                        -1.0 + (pos_x * col_unit), 1.0 - (pos_y * row_unit), 0.0, 0.0, // Top left
-                        -1.0 + (pos_x.add(1.0) * col_unit), 1.0 - (pos_y.add(1.0) * row_unit), 1.0, 1.0, // Bottom right
-                        -1.0 + (pos_x.add(1.0) * col_unit), 1.0 - (pos_y * row_unit), 1.0, 0.0, // Top right
-                    ];
+        vertex_buffer.map_async(wgpu::MapMode::Write, .., move |result| {
+            if result.is_ok() {
+                let mut view = capturable.get_mapped_range_mut(..);
+                let floats: &mut [f32] = bytemuck::cast_slice_mut(&mut view);
+                floats.copy_from_slice(&vertices.finish());
+                drop(view);
+                capturable.unmap();
+                is_mapped.store(false, Ordering::Release);
+            }
+        });
+    }
+}
 
-                    vertices.chunks_mut(4).for_each(|slice| {
-                        slice[0] = slice[0] + (col_margin / 2.0);
-                    });
+#[derive(Debug, Clone)]
+pub struct Vertices {
+    pub tlx: f32,  // top-left x
+    pub tly: f32,  // top-left y
+    pub trx: f32,  // top-right x
+    pub try_: f32, // top-right y (try is a keyword)
+    pub blx: f32,  // bottom-left x
+    pub bly: f32,  // bottom-left y
+    pub brx: f32,  // bottom-right x
+    pub bry: f32,  // bottom-right y
+}
 
-                    let aspect = width as f32 / height as f32;
-                    match aspect {
-                        x if x > 1.0 => {
-                            let error = 1.0 / aspect - 1.0;
-                            let half_abs_err = error.abs() / 2.0;
-                            let unit_offset = half_abs_err * row_unit;
-                            vertices[1] += unit_offset; // Bottom left
-                            vertices[5] += unit_offset; // Bottom right
-                            vertices[9] -= unit_offset; // Top left
-                            vertices[13] -= unit_offset; // Top left
-                            vertices[17] += unit_offset; // Bottom right
-                            vertices[21] -= unit_offset; // Top right
-                        }
-                        x if x < 1.0 => {
-                            let error = aspect - 1.0;
-                            let half_abs_err = error.abs() / 2.0;
-                            let unit_offset = half_abs_err * col_unit;
-                            vertices[0] += unit_offset; // Bottom left
-                            vertices[4] -= unit_offset; // Bottom right
-                            vertices[8] += unit_offset; // Top left
-                            vertices[12] += unit_offset; // Top left
-                            vertices[16] -= unit_offset; // Bottom right
-                            vertices[20] -= unit_offset; // Top right
-                        }
-                        _ => {}
-                    }
-
-                    let mut view = capturable.get_mapped_range_mut(..);
-                    let floats: &mut [f32] = bytemuck::cast_slice_mut(&mut view);
-                    floats.copy_from_slice(&vertices[..]);
-                    drop(view);
-                    capturable.unmap();
-                    is_mapped.store(false, Ordering::Release);
-                }
-            });
+impl Vertices {
+    pub fn new() -> Self {
+        Self {
+            tlx: -1.0,
+            tly: 1.0,
+            trx: 1.0,
+            try_: 1.0,
+            blx: -1.0,
+            bly: -1.0,
+            brx: 1.0,
+            bry: -1.0,
+        }
     }
 
-    pub fn resize_single_image(&mut self, spec: &SingleImageResizeSpec) {
-        if self.mapped.load(Ordering::Acquire) {
-            // Can't handle waiting for single image resize, just return
-            return;
+    pub fn finish(&self) -> [f32; 24] {
+        [
+            // Position x-y Texture x-y
+            self.blx, self.bly, 0.0, 1.0, // Bottom left
+            self.brx, self.bry, 1.0, 1.0, // Bottom right
+            self.tlx, self.tly, 0.0, 0.0, // Top left
+            self.tlx, self.tly, 0.0, 0.0, // Top left
+            self.brx, self.bry, 1.0, 1.0, // Bottom right
+            self.trx, self.try_, 1.0, 0.0, // Top right
+        ]
+    }
+
+    pub fn aspect(mut self, aspect: f32) -> Self {
+        match aspect {
+            x if x > 1.0 => {
+                // Letterbox vertically - adjust y coordinates
+                self.bly /= aspect;
+                self.bry /= aspect;
+                self.tly /= aspect;
+                self.try_ /= aspect;
+            }
+            x if x < 1.0 => {
+                // Pillarbox horizontally - adjust x coordinates
+                let inv_aspect = 1.0 / aspect;
+                self.blx /= inv_aspect;
+                self.brx /= inv_aspect;
+                self.tlx /= inv_aspect;
+                self.trx /= inv_aspect;
+            }
+            _ => {}
         }
 
-        let zoom = spec.zoom;
-        let pan_x = spec.pan_x;
-        let pan_y = spec.pan_y;
-        let vp_width = spec.vp_width;
-        let vp_height = spec.vp_height;
+        self
+    }
 
-        let width = self.width;
-        let height = self.height;
+    pub fn scale(mut self, scale: f32) -> Self {
+        self.tlx *= scale;
+        self.tly *= scale;
+        self.trx *= scale;
+        self.try_ *= scale;
+        self.blx *= scale;
+        self.bly *= scale;
+        self.brx *= scale;
+        self.bry *= scale;
 
-        let capturable = self.vertex_buffer.clone();
-        self.mapped.store(true, Ordering::Release);
-        let is_mapped = self.mapped.clone();
-        self.vertex_buffer
-            .map_async(wgpu::MapMode::Write, .., move |result| {
-                if result.is_ok() {
-                    // Calculate aspect ratios
-                    let image_aspect = width as f32 / height as f32;
-                    let viewport_aspect = vp_width as f32 / vp_height as f32;
+        self
+    }
 
-                    // Determine which dimension constrains the image
-                    // We want the image to fit within the viewport at 1.0 zoom
-                    let (base_width, base_height) = if image_aspect > viewport_aspect {
-                        // Image is wider relative to viewport - width fills the screen
-                        // Height is constrained by aspect ratio
-                        (2.0, 2.0 / image_aspect * viewport_aspect)
-                    } else {
-                        // Image is taller relative to viewport - height fills the screen
-                        // Width is constrained by aspect ratio
-                        (2.0 * image_aspect / viewport_aspect, 2.0)
-                    };
+    pub fn transpose(mut self, x: f32, y: f32) -> Self {
+        self.tlx += x;
+        self.tly += y;
+        self.trx += x;
+        self.try_ += y;
+        self.blx += x;
+        self.bly += y;
+        self.brx += x;
+        self.bry += y;
 
-                    // Apply zoom
-                    let final_width = base_width * zoom;
-                    let final_height = base_height * zoom;
+        self
+    }
 
-                    // Center the image and apply pan offsets
-                    let left = -final_width / 2.0 + pan_x;
-                    let right = final_width / 2.0 + pan_x;
-                    let top = final_height / 2.0 + pan_y;
-                    let bottom = -final_height / 2.0 + pan_y;
+    pub fn top(mut self, value: f32) -> Self {
+        self.tly = value;
+        self.try_ = value;
+        self
+    }
 
-                    #[rustfmt::skip]
-                    let vertices: [f32; 24] = [
-                        // Position x-y Texture x-y
-                        left, bottom, 0.0, 1.0,   // Bottom left
-                        right, bottom, 1.0, 1.0,  // Bottom right
-                        left, top, 0.0, 0.0,      // Top left
-                        left, top, 0.0, 0.0,      // Top left
-                        right, bottom, 1.0, 1.0,  // Bottom right
-                        right, top, 1.0, 0.0,     // Top right
-                    ];
+    pub fn bot(mut self, value: f32) -> Self {
+        self.bly = value;
+        self.bry = value;
+        self
+    }
 
-                    let mut view = capturable.get_mapped_range_mut(..);
-                    let floats: &mut [f32] = bytemuck::cast_slice_mut(&mut view);
-                    floats.copy_from_slice(&vertices[..]);
-                    drop(view);
-                    capturable.unmap();
-                    is_mapped.store(false, Ordering::Release);
-                }
-            });
+    pub fn left(mut self, value: f32) -> Self {
+        self.tlx = value;
+        self.blx = value;
+        self
+    }
+
+    pub fn right(mut self, value: f32) -> Self {
+        self.trx = value;
+        self.brx = value;
+        self
+    }
+
+    pub fn gallery(
+        self,
+        ww: f32,
+        wh: f32,
+        iw: f32,
+        ih: f32,
+        row_no: f32,
+        col_no: f32,
+        pos: f32,
+    ) -> Self {
+        let margin = ww.rem(wh.div(row_no).trunc()) / ww;
+
+        let col_idx = pos % col_no;
+        let row_idx = (pos - col_idx) / col_no;
+
+        let col_offset = col_idx - (col_no - 1.0) / 2.0;
+        let row_offset = row_idx - (row_no - 1.0) / 2.0;
+
+        let cell_height = 2.0 / row_no;
+        let cell_width = (2.0 - margin * 2.0) / col_no;
+
+        let unit_height = 1.0 / row_no;
+        let unit_width = (1.0 - margin) / col_no;
+
+        self.top(unit_height)
+            .bot(-unit_height)
+            .left(-unit_width)
+            .right(unit_width)
+            .aspect(iw.div(ih))
+            .transpose(col_offset * cell_width, -row_offset * cell_height)
     }
 }
