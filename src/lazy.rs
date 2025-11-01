@@ -108,17 +108,20 @@ impl ImageRequest {
         }
     }
 
-    pub fn eval(self) {
-        self.response_channel
-            .send(GenericImage::new(&self.path))
-            .unwrap();
+    /// Returns whether the result was an error
+    pub fn eval(self) -> bool {
+        let result = GenericImage::new(&self.path);
+        let is_err = result.is_err();
+        self.response_channel.send(result).unwrap();
+        is_err
     }
 }
 
 #[derive(Debug)]
 pub struct ImageLoaderService {
     sender: Sender<ImageRequest>,
-    completion_receiver: Receiver<PathBuf>,
+    /// Bool represents if the completion resulted in Err
+    completion_receiver: Receiver<(PathBuf, bool)>,
     #[allow(dead_code)]
     handles: Vec<JoinHandle<()>>,
 }
@@ -136,7 +139,7 @@ impl ImageLoaderService {
         let parallelism = parallelism.min(Self::MIN_PAR).max(Self::MAX_PAR);
         tracing::info!("ImageLoaderService parallelism: {parallelism}");
 
-        let (completion_sender, completion_receiver) = unbounded::<PathBuf>();
+        let (completion_sender, completion_receiver) = unbounded();
         let (sender, receiver) = unbounded::<ImageRequest>();
         let mut handles = Vec::new();
         for id in 0..parallelism {
@@ -148,8 +151,8 @@ impl ImageLoaderService {
                     Ok(req) => {
                         let path = req.path.clone();
                         tracing::trace!("Request on {id}:{:?}", path);
-                        req.eval();
-                        let _ = completion_sender.send(path);
+                        let was_err = req.eval();
+                        let _ = completion_sender.send((path, was_err));
                     }
                     Err(_) => break,
                 };
@@ -168,10 +171,10 @@ impl ImageLoaderService {
         self.sender.clone()
     }
 
-    pub fn completed(&self) -> Vec<PathBuf> {
+    pub fn completed(&self) -> Vec<(PathBuf, bool)> {
         let mut completed = Vec::new();
-        while let Ok(path) = self.completion_receiver.try_recv() {
-            completed.push(path)
+        while let Ok(result) = self.completion_receiver.try_recv() {
+            completed.push(result)
         }
         completed
     }

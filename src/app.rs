@@ -7,7 +7,7 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
-    event::WindowEvent,
+    event::{MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::ModifiersState,
     window::{Window, WindowId},
@@ -191,6 +191,20 @@ impl App {
         self.bound_cursor_to_grid();
     }
 
+    pub fn row_offset_decrease(&mut self) {
+        self.row_offset = self.row_offset.saturating_sub(1);
+        self.bound_cursor_to_grid();
+    }
+
+    pub fn row_offset_increase(&mut self) {
+        let min = (self.images.len() as f64 / self.col_no as f64)
+            .sub(self.row_no as f64)
+            .ceil()
+            .max(0.0) as usize;
+        self.row_offset = self.row_offset.saturating_add(1).min(min);
+        self.bound_cursor_to_grid();
+    }
+
     pub fn left(&mut self) {
         self.cursor_idx = self.cursor_idx.saturating_sub(1);
         self.ensure_cursor_visible();
@@ -251,10 +265,13 @@ impl App {
         let grid_start = self.row_offset * self.col_no as usize;
         let grid_end = (grid_start + grid_size).min(self.images.len());
 
-        // Clamp cursor_idx to be within the visible grid
-        self.cursor_idx = self
-            .cursor_idx
-            .clamp(grid_start, grid_end.saturating_sub(1));
+        if grid_start > grid_end.saturating_sub(1) {
+            self.cursor_idx = self.images.len().saturating_sub(1);
+        } else {
+            self.cursor_idx = self
+                .cursor_idx
+                .clamp(grid_start, grid_end.saturating_sub(1));
+        }
     }
 
     /// Updates row_offset to ensure the current cursor_idx is visible
@@ -310,12 +327,35 @@ impl App {
         );
     }
 
-    fn resize_fresh_images(&self) {
-        let fresh = self.image_loader_service.completed();
+    fn resize_fresh_images(&mut self) {
+        let paths = self.image_loader_service.completed();
+
+        let err_paths: Vec<_> = paths
+            .clone()
+            .into_iter()
+            .filter(|(_, was_err)| *was_err)
+            .map(|(path, _)| path)
+            .collect();
+        let len = self.images.len();
+        self.images.retain(|x| !err_paths.contains(x.path()));
+        if len - self.images.len() > 0 {
+            tracing::debug!("Retain removed {} paths", len - self.images.len());
+        }
+
+        if self.images.len() == 0 {
+            self.exiting = true;
+        }
+
+        let non_err_paths: Vec<_> = paths
+            .into_iter()
+            .filter(|(_, was_err)| !*was_err)
+            .map(|(path, _)| path)
+            .collect();
+
         let images = self
             .visible_grid_images()
             .iter()
-            .filter(|img| fresh.contains(img.path()));
+            .filter(|img| non_err_paths.contains(img.path()));
         let size = self.window_size.unwrap();
         self.state.as_ref().unwrap().resize(
             images,
@@ -360,10 +400,25 @@ impl ApplicationHandler for App {
                 self.state.as_ref().unwrap().request_redraw();
             }
             WindowEvent::Resized(size) => {
-                tracing::debug!("Resize: {size:?}");
+                tracing::debug!("Resize: {}x{}", size.width, size.height);
                 self.state.as_mut().unwrap().resize_surface(size);
                 self.update_window_size(size);
                 self.resize();
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // tracing::error!("Delta: {delta:?}");
+                match delta {
+                    MouseScrollDelta::LineDelta(_, y) => {
+                        if y > 0.0 {
+                            self.row_offset_decrease();
+                            self.resize();
+                        } else {
+                            self.row_offset_increase();
+                            self.resize();
+                        }
+                    }
+                    MouseScrollDelta::PixelDelta(_) => {}
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.update_cursor_pos(position);
