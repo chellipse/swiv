@@ -90,7 +90,12 @@ impl Cli {
                     let path = entry.path();
 
                     // so we traverse symbolic links
-                    let meta = std::fs::metadata(&path).expect("Failed to get metadata");
+                    let Ok(meta) = std::fs::metadata(&path) else {
+                        // NOTE since std::fs::metadata chases symlinks, this will
+                        // err on dead links
+                        tracing::warn!("Failed to get metadata from: {path:?}");
+                        return None;
+                    };
 
                     match (
                         meta.file_type(),
