@@ -137,6 +137,11 @@ impl App {
             .map(|path| LazyImage::new(path, image_loader_service.clone_sender()))
             .collect();
 
+        let mut exiting = false;
+        if images.len() == 0 {
+            exiting = true;
+        }
+
         Self {
             state: None,
             images,
@@ -151,7 +156,7 @@ impl App {
             drag_start_pos: None,
             cursor_idx: 0,
             row_offset: 0,
-            exiting: false,
+            exiting,
         }
     }
 
