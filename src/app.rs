@@ -15,7 +15,7 @@ use winit::{
 
 use crate::{
     keymap::{KeySpec, Keymap, MappableApp},
-    lazy::{ImageLoaderServiceHandle, LazyImage},
+    lazy::{ImageLoaderService, LazyImage},
     state::State,
 };
 
@@ -87,7 +87,7 @@ impl CursorPosition {
 pub struct App {
     state: Option<State>,
     images: Vec<LazyImage>,
-    image_loader_service_handle: ImageLoaderServiceHandle,
+    image_loader_service: ImageLoaderService,
 
     /// Store the state from it so it can be accessed by methods triggered
     /// from [`Keymap::apply`] calls
@@ -122,7 +122,7 @@ impl App {
     const ROW_NO_MAX: u32 = 32;
 
     pub fn new(path_func: fn() -> Vec<PathBuf>) -> Self {
-        let image_loader_service_handle = ImageLoaderServiceHandle::new(0);
+        let image_loader_service = ImageLoaderService::new(0);
 
         let paths = path_func();
         tracing::info!("Path count: {}", paths.len());
@@ -134,13 +134,13 @@ impl App {
 
         let images: Vec<_> = paths
             .into_iter()
-            .map(|path| LazyImage::new(path, image_loader_service_handle.clone_sender()))
+            .map(|path| LazyImage::new(path, image_loader_service.clone_sender()))
             .collect();
 
         Self {
             state: None,
             images,
-            image_loader_service_handle,
+            image_loader_service,
             last_window_event: None,
             mode: Mode::Gallery,
             row_no: 3,
@@ -285,19 +285,33 @@ impl App {
             return &mut [];
         }
 
+        self.images[start_idx..end_idx]
+            .iter()
+            .enumerate()
+            .for_each(|(val, img)| img.set_pos(val));
+
         &self.images[start_idx..end_idx]
     }
 
     fn resize(&self) {
         let images = self.visible_grid_images().iter();
         let size = self.window_size.unwrap();
-        tracing::debug!(
-            "Resizing: {}x{} C: {} OFFSET: {}",
-            self.row_no,
-            self.col_no,
-            self.cursor_idx,
-            self.row_offset
+        self.state.as_ref().unwrap().resize(
+            images,
+            size.width as f32,
+            size.height as f32,
+            self.row_no as f32,
+            self.col_no as f32,
         );
+    }
+
+    fn resize_fresh_images(&self) {
+        let fresh = self.image_loader_service.completed();
+        let images = self
+            .visible_grid_images()
+            .iter()
+            .filter(|img| fresh.contains(img.path()));
+        let size = self.window_size.unwrap();
         self.state.as_ref().unwrap().resize(
             images,
             size.width as f32,
@@ -335,9 +349,9 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
+                self.resize_fresh_images();
                 let images = self.visible_grid_images().iter();
                 self.state.as_ref().unwrap().render(images);
-
                 self.state.as_ref().unwrap().request_redraw();
             }
             WindowEvent::Resized(size) => {

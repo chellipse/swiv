@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     marker::PhantomData,
     ops::{Div, Rem},
     path::{Path, PathBuf},
@@ -22,6 +22,7 @@ use wgpu::{
 #[derive(Debug)]
 pub struct LazyImage {
     state: RefCell<LazyImageState>,
+    grid_pos: Cell<usize>,
     path: PathBuf,
     _not_send: PhantomData<*const ()>, // Makes the type !Send
 }
@@ -38,12 +39,21 @@ impl LazyImage {
     pub fn new(path: PathBuf, req_sender: Sender<ImageRequest>) -> Self {
         Self {
             path,
+            grid_pos: Cell::new(0),
             state: RefCell::new(LazyImageState::Uninitialized(req_sender)),
             _not_send: PhantomData,
         }
     }
 
-    pub fn path(&self) -> &Path {
+    pub fn set_pos(&self, val: usize) {
+        self.grid_pos.set(val);
+    }
+
+    pub fn get_pos(&self) -> usize {
+        self.grid_pos.get()
+    }
+
+    pub fn path(&self) -> &PathBuf {
         &self.path
     }
 
@@ -106,13 +116,14 @@ impl ImageRequest {
 }
 
 #[derive(Debug)]
-pub struct ImageLoaderServiceHandle {
+pub struct ImageLoaderService {
     sender: Sender<ImageRequest>,
+    completion_receiver: Receiver<PathBuf>,
     #[allow(dead_code)]
     handles: Vec<JoinHandle<()>>,
 }
 
-impl ImageLoaderServiceHandle {
+impl ImageLoaderService {
     const MIN_PAR: usize = 2;
     const MAX_PAR: usize = 16;
 
@@ -125,16 +136,20 @@ impl ImageLoaderServiceHandle {
         let parallelism = parallelism.min(Self::MIN_PAR).max(Self::MAX_PAR);
         tracing::info!("ImageLoaderService parallelism: {parallelism}");
 
+        let (completion_sender, completion_receiver) = unbounded::<PathBuf>();
         let (sender, receiver) = unbounded::<ImageRequest>();
         let mut handles = Vec::new();
         for id in 0..parallelism {
             let receiver = receiver.clone();
+            let completion_sender = completion_sender.clone();
 
             let handle = thread::spawn(move || loop {
                 match receiver.recv() {
                     Ok(req) => {
-                        tracing::trace!("Request on {id}:{:?}", req.path);
+                        let path = req.path.clone();
+                        tracing::trace!("Request on {id}:{:?}", path);
                         req.eval();
+                        let _ = completion_sender.send(path);
                     }
                     Err(_) => break,
                 };
@@ -142,11 +157,23 @@ impl ImageLoaderServiceHandle {
             handles.push(handle);
         }
 
-        Self { sender, handles }
+        Self {
+            sender,
+            completion_receiver,
+            handles,
+        }
     }
 
     pub fn clone_sender(&self) -> Sender<ImageRequest> {
         self.sender.clone()
+    }
+
+    pub fn completed(&self) -> Vec<PathBuf> {
+        let mut completed = Vec::new();
+        while let Ok(path) = self.completion_receiver.try_recv() {
+            completed.push(path)
+        }
+        completed
     }
 }
 

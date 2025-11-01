@@ -293,8 +293,7 @@ impl State {
         mut func: impl FnMut(&mut RenderableImage, usize),
     ) {
         for (pos, path, img) in images
-            .enumerate()
-            .map(|(pos, img)| (pos, img.path(), img))
+            .map(|img| (img.get_pos(), img.path(), img))
             .filter_map(|(pos, path, img)| img.get().and_then(|r| Some((pos, path, r))))
             .filter_map(|(pos, path, img)| img.ok().and_then(|r| Some((pos, path, r))))
         {
