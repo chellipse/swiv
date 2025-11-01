@@ -105,7 +105,7 @@ impl Cli {
                                 Box::new(std::iter::once(entry));
                             Some(iter)
                         }
-                        (ft, r, _) if ft.is_dir() && r > 0 => {
+                        (ft, r, true) if ft.is_dir() && r > 0 => {
                             Self::open_dir(path, recursion.saturating_sub(1), no_ignore).ok()
                         }
                         // TODO make this traverse a set number of symlinks
