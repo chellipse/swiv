@@ -192,13 +192,13 @@ impl App {
     pub fn row_no_increase(&mut self) {
         self.row_no = self.row_no.add(1).min(Self::ROW_NO_MAX);
         self.col_no_recalc();
-        self.bound_cursor_to_grid();
+        self.ensure_cursor_visible();
     }
 
     pub fn row_no_decrease(&mut self) {
         self.row_no = self.row_no.sub(1).max(Self::ROW_NO_MIN);
         self.col_no_recalc();
-        self.bound_cursor_to_grid();
+        self.ensure_cursor_visible();
     }
 
     pub fn row_offset_decrease(&mut self) {
