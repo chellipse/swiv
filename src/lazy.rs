@@ -1,5 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
+    fs::File,
+    io::BufReader,
     marker::PhantomData,
     ops::{Div, Rem},
     path::{Path, PathBuf},
@@ -13,7 +15,7 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use image::{DynamicImage, EncodableLayout, ImageDecoder};
+use image::{DynamicImage, EncodableLayout, ImageDecoder, ImageReader};
 use wgpu::{
     util::DeviceExt, BindGroup, BindGroupLayout, Buffer, Device, Queue, RenderPass, Sampler,
     TextureFormat, TextureUsages,
@@ -193,7 +195,12 @@ impl GenericImage {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         tracing::trace!("Loading {:?}", path.as_ref());
 
-        let mut decoder = image::ImageReader::open(&path)?.into_decoder()?;
+        let file = File::open(&path)?;
+        let reader = BufReader::new(file);
+
+        let mut decoder = ImageReader::new(reader)
+            .with_guessed_format()?
+            .into_decoder()?;
         let icc_profile = decoder.icc_profile()?;
         let mut img = DynamicImage::from_decoder(decoder)?;
 
