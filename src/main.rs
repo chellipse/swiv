@@ -9,7 +9,7 @@ use clap::Parser;
 use itertools::Itertools;
 use winit::event_loop::{ControlFlow, EventLoop};
 
-use untitled_image_viewer::app::App;
+use untitled_image_viewer::{app::App, tracing_format::CustomFormat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -131,9 +131,7 @@ fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
         )
         .with_writer(stdout)
-        .with_target(true)
-        .with_file(true)
-        .with_line_number(true)
+        .event_format(CustomFormat::new())
         .init();
 
     let event_loop = EventLoop::new().unwrap();
