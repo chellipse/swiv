@@ -140,7 +140,16 @@ fn main() {
 
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(|| Cli::parse().get_paths().unwrap());
+    let cli = Cli::parse();
+    let paths = match cli.get_paths() {
+        Ok(x) => x,
+        Err(e) => {
+            tracing::error!("{e} from {:?}", cli.target);
+            std::process::exit(1);
+        }
+    };
+
+    let mut app = App::new(paths);
     event_loop.run_app(&mut app).unwrap();
 }
 

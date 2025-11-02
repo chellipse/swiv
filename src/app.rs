@@ -122,10 +122,9 @@ impl App {
     const ROW_NO_MIN: u32 = 2;
     const ROW_NO_MAX: u32 = 32;
 
-    pub fn new(path_func: fn() -> Vec<PathBuf>) -> Self {
+    pub fn new(paths: Vec<PathBuf>) -> Self {
         let image_loader_service = ImageLoaderService::new(0);
 
-        let paths = path_func();
         tracing::info!("Path count: {}", paths.len());
         const NO_FIRST_DISPLAYED: usize = 10;
         tracing::debug!(
