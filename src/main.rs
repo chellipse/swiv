@@ -54,7 +54,7 @@ impl Cli {
         let mut iter: Box<dyn Iterator<Item = _>> =
             Box::new(Self::open_dir(&target, recursion, self.no_ignore)?.map(|entry| entry.path()));
 
-        if !self.ignore_ext {
+        if self.ignore_ext {
             // currently we only support formats image-rs supports
             const EXTENSIONS: &[&str] = &[
                 "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif", "tga", "dds",
