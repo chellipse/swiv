@@ -116,6 +116,7 @@ pub struct App {
 
     // switches
     exiting: bool,
+    exit_msg: Option<String>,
 }
 
 impl App {
@@ -159,11 +160,17 @@ impl App {
             cursor_idx: 0,
             row_offset: 0,
             exiting,
+            exit_msg: None,
             sys,
         }
     }
 
     pub fn exit(&mut self) {
+        self.exiting = true;
+    }
+
+    pub fn exit_msg(&mut self, msg: String) {
+        self.exit_msg = Some(msg);
         self.exiting = true;
     }
 
@@ -367,14 +374,22 @@ impl App {
             .filter(|(_, was_err)| *was_err)
             .map(|(path, _)| path)
             .collect();
+
         let len = self.images.len();
-        self.images.retain(|x| !err_paths.contains(x.path()));
+        self.images.retain(|x| {
+            if err_paths.contains(x.path()) {
+                tracing::trace!("Removing: {:?}", x.path());
+                false
+            } else {
+                true
+            }
+        });
         if len - self.images.len() > 0 {
             tracing::debug!("Retain removed {} paths", len - self.images.len());
         }
 
         if self.images.len() == 0 {
-            self.exiting = true;
+            self.exit_msg("No images left to display. aborting".to_string());
         }
 
         let non_err_paths: Vec<_> = paths
@@ -425,6 +440,13 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
+                if self.exiting {
+                    if let Some(msg) = &self.exit_msg {
+                        println!("{}: {msg}", env!("CARGO_PKG_NAME"));
+                    }
+                    std::process::exit(0);
+                }
+
                 self.resize_fresh_images();
                 let images = self.visible_grid_images().iter();
                 self.state.as_ref().unwrap().render(images);
@@ -467,10 +489,6 @@ impl ApplicationHandler for App {
 
                 if mutated {
                     self.resize()
-                }
-
-                if self.exiting {
-                    event_loop.exit();
                 }
             }
         }
