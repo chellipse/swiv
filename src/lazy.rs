@@ -129,8 +129,8 @@ pub struct ImageLoaderService {
 }
 
 impl ImageLoaderService {
-    const MIN_PAR: usize = 2;
-    const MAX_PAR: usize = 16;
+    const MIN_PAR: usize = 1;
+    const MAX_PAR: usize = 4;
 
     pub fn new(parallelism: usize) -> Self {
         let parallelism = match (parallelism, thread::available_parallelism()) {
