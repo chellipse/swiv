@@ -346,11 +346,6 @@ impl App {
             let available = self.sys.available_memory();
             let total = self.sys.total_memory();
             let available_pct = (available as f64 / total as f64) * 100.0;
-            tracing::info!(
-                "Mem Avail: {} MB ({:.1}%)",
-                available / 10u64.pow(6),
-                available_pct
-            );
 
             match available {
                 x if x < 2u64 * 10u64.pow(9) => {
@@ -362,7 +357,16 @@ impl App {
                     self.exiting = true;
                 }
                 x if x < 4u64 * 10u64.pow(9) => {
-                    tracing::warn!("Low memory! Only {} MB available", available / 10u64.pow(6));
+                    tracing::warn!(
+                        "Low memory! Only {} MB available ({available_pct:.1}%)",
+                        available / 10u64.pow(6)
+                    );
+                }
+                x if x < 8u64 * 10u64.pow(9) => {
+                    tracing::info!(
+                        "Low memory! Only {} MB available ({available_pct:.1}%)",
+                        available / 10u64.pow(6)
+                    );
                 }
                 _ => {}
             }
