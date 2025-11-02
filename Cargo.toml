@@ -3,11 +3,12 @@ name = "untitled-image-viewer"
 version = "0.1.0"
 edition = "2024"
 
-[profile.release] # for perf
+[profile.release]
 debug = true
 opt-level = 3
 strip = false
 
+# if package isn't in [dependencies] than this will get removed by cargo commands
 [profile.dev.package.tikv-jemalloc-sys]
 opt-level = 3
 
@@ -28,3 +29,4 @@ tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sysinfo = "0.37.2"
 tikv-jemallocator = "0.6.1"
+tikv-jemalloc-sys = "0.6.1"
