@@ -238,6 +238,7 @@ impl App {
             size.height as f32,
             self.row_no as f32,
             self.col_no as f32,
+            self.get_rel_cursor_idx() as f32,
         );
     }
 
@@ -317,6 +318,7 @@ impl App {
             size.height as f32,
             self.row_no as f32,
             self.col_no as f32,
+            self.get_rel_cursor_idx() as f32,
         );
     }
 

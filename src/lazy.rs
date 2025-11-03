@@ -567,4 +567,33 @@ impl Vertices {
             .aspect(iw.div(ih))
             .transpose(col_offset * cell_width, -row_offset * cell_height)
     }
+
+    pub fn gallery_cursor(
+        self,
+        ww: f32,
+        wh: f32,
+        row_no: f32,
+        col_no: f32,
+        cursor_idx: f32,
+    ) -> Self {
+        let margin = ww.rem(wh.div(row_no).trunc()) / ww;
+
+        let col_idx = cursor_idx % col_no;
+        let row_idx = (cursor_idx - col_idx) / col_no;
+
+        let col_offset = col_idx - (col_no - 1.0) / 2.0;
+        let row_offset = row_idx - (row_no - 1.0) / 2.0;
+
+        let cell_height = 2.0 / row_no;
+        let cell_width = (2.0 - margin * 2.0) / col_no;
+
+        let unit_height = 1.0 / row_no;
+        let unit_width = (1.0 - margin) / col_no;
+
+        self.top(unit_height)
+            .bot(unit_height - (unit_height / 2.5))
+            .left(-unit_width)
+            .right(-unit_width + (unit_width / 2.5))
+            .transpose(col_offset * cell_width, -row_offset * cell_height)
+    }
 }

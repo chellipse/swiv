@@ -1,9 +1,9 @@
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, sync::Arc};
 
-use wgpu::{Features, TextureFormat, TextureUsages};
+use wgpu::{wgt::PollType, Features, TextureFormat, TextureUsages};
 use winit::window::Window;
 
-use crate::lazy::{LazyImage, RenderableImage, Vertices};
+use crate::lazy::{LazyImage, LazyVertexBuffer, RenderableImage, Vertices};
 
 #[derive(Debug)]
 pub struct State {
@@ -14,14 +14,13 @@ pub struct State {
     surface: wgpu::Surface<'static>,
     surface_format: TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
-    invert_pipeline: wgpu::RenderPipeline,
-    selection_buffer: wgpu::Buffer,
-    selection_bind_group: wgpu::BindGroup,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    /// used to ensure things are resized after an image removal
-    needs_resize: bool,
     image_state_map: RefCell<HashMap<PathBuf, RenderableImage>>,
+    // gallery mode cursor rendering
+    invert_pipeline: wgpu::RenderPipeline,
+    cursor_buffer: RefCell<LazyVertexBuffer>,
+    cursor_bind_group: wgpu::BindGroup,
 }
 
 impl State {
@@ -182,16 +181,11 @@ impl State {
             ..Default::default()
         });
 
-        let selection_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Selection indicator buffer"),
-            size: std::mem::size_of::<[f32; 24]>() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let cursor_buffer = RefCell::new(LazyVertexBuffer::new(&device));
 
-        // Create a dummy 1x1 white texture for the selection indicator
+        // Create a dummy 1x1 white texture for the cursor indicator
         let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Dummy selection texture"),
+            label: Some("Dummy cursor texture"),
             size: wgpu::Extent3d {
                 width: 1,
                 height: 1,
@@ -227,7 +221,7 @@ impl State {
 
         let dummy_texture_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let selection_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let cursor_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -239,7 +233,7 @@ impl State {
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
             ],
-            label: Some("Selection indicator bind group"),
+            label: Some("Cursor indicator bind group"),
         });
 
         let state = Self {
@@ -251,11 +245,10 @@ impl State {
             surface_format,
             render_pipeline,
             invert_pipeline,
-            selection_buffer,
-            selection_bind_group,
+            cursor_buffer,
+            cursor_bind_group,
             bind_group_layout,
             sampler,
-            needs_resize: false,
             image_state_map: RefCell::new(HashMap::new()),
         };
 
@@ -327,12 +320,18 @@ impl State {
         wh: f32,
         row_no: f32,
         col_no: f32,
+        cursor_idx: f32,
     ) {
         self.apply_op_to_image_states(images, |renderable, pos| {
             let iw = renderable.width() as f32;
             let ih = renderable.height() as f32;
             renderable.resize(Vertices::new().gallery(ww, wh, iw, ih, row_no, col_no, pos as f32));
         });
+
+        self.cursor_buffer
+            .borrow_mut()
+            .resize(Vertices::new().gallery_cursor(ww, wh, row_no, col_no, cursor_idx));
+        let _ = self.device.poll(PollType::Wait);
     }
 
     pub fn render<'a>(&self, images: impl Iterator<Item = &'a LazyImage>) {
@@ -369,6 +368,15 @@ impl State {
         self.apply_op_to_image_states(images, |renderable, _| {
             renderable.render(&mut renderpass);
         });
+
+        if let Some(buffer) = self.cursor_buffer.borrow_mut().get() {
+            renderpass.set_pipeline(&self.invert_pipeline);
+            renderpass.set_bind_group(0, &self.cursor_bind_group, &[]);
+            renderpass.set_vertex_buffer(0, buffer.slice(..));
+            renderpass.draw(0..6, 0..1);
+        } else {
+            tracing::warn!("No cursor buffer");
+        }
 
         drop(renderpass);
 
