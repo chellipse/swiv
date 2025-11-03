@@ -517,6 +517,9 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.set_cursor_pos(position);
             }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+            }
             _ => {
                 self.last_window_event = Some(event);
 
