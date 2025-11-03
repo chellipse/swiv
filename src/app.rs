@@ -36,9 +36,12 @@ static KEYMAPS: LazyLock<Vec<Keymap<App>>> = LazyLock::new(|| {
         KeySpec::new("down").unwrap().to_bind(App::down),
         KeySpec::new("k").unwrap().to_bind(App::up),
         KeySpec::new("up").unwrap().to_bind(App::up),
+        KeySpec::new("f").unwrap().to_bind(App::toggle_fullscreen),
+        KeySpec::new("g").unwrap().to_bind(App::go_top),
+        KeySpec::new("S-g").unwrap().to_bind(App::go_bottom),
         // gallery
         KeySpec::new("-").unwrap().to_bind(App::row_no_increase).with_mode(Mode::Gallery),
-        KeySpec::new("S-=").unwrap().to_bind(App::noop).with_mode(Mode::Gallery), // '+'
+        KeySpec::new("S-=").unwrap().to_bind(App::row_no_reset).with_mode(Mode::Gallery), // '+'
         KeySpec::new("=").unwrap().to_bind(App::row_no_decrease).with_mode(Mode::Gallery),
         // single
         KeySpec::new("-").unwrap().to_bind(App::noop).with_mode(Mode::SingleImage),
@@ -122,6 +125,7 @@ pub struct App {
 impl App {
     const ROW_NO_MIN: u32 = 2;
     const ROW_NO_MAX: u32 = 32;
+    const ROW_NO_DEFAULT: u32 = 4;
 
     pub fn new(paths: Vec<PathBuf>) -> Self {
         let image_loader_service = ImageLoaderService::new(0);
@@ -151,7 +155,7 @@ impl App {
             image_loader_service,
             last_window_event: None,
             mode: Mode::Gallery,
-            row_no: 3,
+            row_no: Self::ROW_NO_DEFAULT,
             col_no: 1,
             window_size: None,
             modifiers: ModifiersState::empty(),
@@ -174,9 +178,17 @@ impl App {
         self.exiting = true;
     }
 
+    pub fn toggle_fullscreen(&mut self) {
+        self.state.as_ref().unwrap().toggle_fullscreen();
+    }
+
     pub fn toggle_mode(&mut self) {
         todo!();
         // self.mode.toggle();
+    }
+
+    pub fn row_no_reset(&mut self) {
+        self.set_row_no(Self::ROW_NO_DEFAULT);
     }
 
     pub fn row_no_increase(&mut self) {
@@ -197,6 +209,14 @@ impl App {
             .ceil()
             .max(0.0) as usize;
         self.set_row_offset(self.row_offset.saturating_add(1).min(min));
+    }
+
+    pub fn go_top(&mut self) {
+        self.set_cursor_idx(0);
+    }
+
+    pub fn go_bottom(&mut self) {
+        self.set_cursor_idx(self.images.len() - 1);
     }
 
     pub fn left(&mut self) {

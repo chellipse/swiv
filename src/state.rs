@@ -1,7 +1,7 @@
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, sync::Arc};
 
 use wgpu::{wgt::PollType, Features, TextureFormat, TextureUsages};
-use winit::window::Window;
+use winit::window::{Fullscreen, Window};
 
 use crate::lazy::{LazyImage, LazyVertexBuffer, RenderableImage, Vertices};
 
@@ -255,6 +255,15 @@ impl State {
         state.configure_surface();
 
         state
+    }
+
+    pub fn toggle_fullscreen(&self) {
+        let fullscreen = if self.window.fullscreen().is_some() {
+            None
+        } else {
+            Some(Fullscreen::Borderless(None))
+        };
+        self.window.set_fullscreen(fullscreen);
     }
 
     pub fn request_redraw(&self) {
