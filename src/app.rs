@@ -112,7 +112,7 @@ pub struct App {
     cursor_idx: usize,
     /// - must be dragged by [`Self::selection_idx`]
     row_offset: usize,
-    drag_start_pos: Option<CursorPosition>,
+    drag_start_pos: Option<(f64, f64)>,
 
     // switches
     exiting: bool,
@@ -174,36 +174,21 @@ impl App {
         self.exiting = true;
     }
 
-    pub fn update_cursor_pos(&mut self, pos: PhysicalPosition<f64>) {
-        self.cursor_pos = Some(CursorPosition::new(pos.x, pos.y));
-    }
-
-    pub fn update_window_size(&mut self, size: PhysicalSize<u32>) {
-        self.window_size = Some(size);
-        self.col_no_recalc();
-        self.bound_cursor_to_grid();
-    }
-
     pub fn toggle_mode(&mut self) {
         todo!();
         // self.mode.toggle();
     }
 
     pub fn row_no_increase(&mut self) {
-        self.row_no = self.row_no.add(1).min(Self::ROW_NO_MAX);
-        self.col_no_recalc();
-        self.ensure_cursor_visible();
+        self.set_row_no(self.row_no.add(1).min(Self::ROW_NO_MAX));
     }
 
     pub fn row_no_decrease(&mut self) {
-        self.row_no = self.row_no.sub(1).max(Self::ROW_NO_MIN);
-        self.col_no_recalc();
-        self.ensure_cursor_visible();
+        self.set_row_no(self.row_no.sub(1).max(Self::ROW_NO_MIN));
     }
 
     pub fn row_offset_decrease(&mut self) {
-        self.row_offset = self.row_offset.saturating_sub(1);
-        self.bound_cursor_to_grid();
+        self.set_row_offset(self.row_offset.saturating_sub(1));
     }
 
     pub fn row_offset_increase(&mut self) {
@@ -211,121 +196,40 @@ impl App {
             .sub(self.row_no as f64)
             .ceil()
             .max(0.0) as usize;
-        self.row_offset = self.row_offset.saturating_add(1).min(min);
-        self.bound_cursor_to_grid();
+        self.set_row_offset(self.row_offset.saturating_add(1).min(min));
     }
 
     pub fn left(&mut self) {
-        self.cursor_idx = self.cursor_idx.saturating_sub(1);
-        self.ensure_cursor_visible();
+        self.set_cursor_idx(self.cursor_idx.saturating_sub(1));
     }
 
     pub fn right(&mut self) {
-        self.cursor_idx = self.cursor_idx.add(1).min(self.images.len() - 1);
-        self.ensure_cursor_visible();
+        self.set_cursor_idx(self.cursor_idx.add(1).min(self.images.len() - 1));
     }
 
     pub fn up(&mut self) {
-        self.cursor_idx = self.cursor_idx.saturating_sub(self.col_no as usize);
-        self.ensure_cursor_visible();
+        self.set_cursor_idx(self.cursor_idx.saturating_sub(self.col_no as usize));
     }
 
     pub fn down(&mut self) {
-        self.cursor_idx = self
-            .cursor_idx
-            .add(self.col_no as usize)
-            .min(self.images.len() - 1);
-        self.ensure_cursor_visible();
+        self.set_cursor_idx(
+            self.cursor_idx
+                .add(self.col_no as usize)
+                .min(self.images.len() - 1),
+        );
     }
 
     /// TODO what happens if window size changes while drag is in progress?
     /// FIX store it as NDC
     pub fn start_drag(&mut self) {
-        self.drag_start_pos = self.cursor_pos;
-    }
-
-    fn get_drag_offset_ndc(&mut self) -> Option<(f64, f64)> {
-        match self {
-            Self {
-                window_size: Some(window_size),
-                drag_start_pos: Some(start),
-                cursor_pos: Some(current),
-                ..
-            } => {
-                let (sx, sy) = start.to_ndc(window_size);
-                let (cx, cy) = current.to_ndc(window_size);
-                Some((cx.sub(sx), cy.sub(sy)))
-            }
-            _ => None,
+        if let Some(cursor) = &self.cursor_pos
+            && let Some(size) = &self.window_size
+        {
+            self.drag_start_pos = Some(cursor.to_ndc(size));
         }
     }
 
-    fn col_no_recalc(&mut self) {
-        if let Some(size) = self.window_size {
-            let grid_height = size.height / self.row_no;
-            self.col_no = size.width / grid_height;
-        }
-    }
-
-    /// Bounds cursor_idx to be within the current visible grid
-    /// based on row_no, col_no, and row_offset.
-    /// This ensures the cursor doesn't exceed the grid boundaries.
-    fn bound_cursor_to_grid(&mut self) {
-        let grid_size = (self.row_no * self.col_no) as usize;
-        let grid_start = self.row_offset * self.col_no as usize;
-        let grid_end = (grid_start + grid_size).min(self.images.len());
-
-        if grid_start > grid_end.saturating_sub(1) {
-            self.cursor_idx = self.images.len().saturating_sub(1);
-        } else {
-            self.cursor_idx = self
-                .cursor_idx
-                .clamp(grid_start, grid_end.saturating_sub(1));
-        }
-    }
-
-    /// Updates row_offset to ensure the current cursor_idx is visible
-    /// in the grid. If cursor_idx is already visible, row_offset is unchanged.
-    fn ensure_cursor_visible(&mut self) {
-        if self.col_no == 0 {
-            return;
-        }
-
-        let cursor_row = self.cursor_idx / self.col_no as usize;
-        let visible_start_row = self.row_offset;
-        let visible_end_row = self.row_offset + self.row_no as usize;
-
-        if cursor_row < visible_start_row {
-            // Cursor is above visible area, scroll up
-            self.row_offset = cursor_row;
-        } else if cursor_row >= visible_end_row {
-            // Cursor is below visible area, scroll down
-            self.row_offset = cursor_row.saturating_sub(self.row_no as usize - 1);
-        }
-    }
-
-    pub fn visible_grid_images(&self) -> &[LazyImage] {
-        if self.col_no == 0 || self.row_no == 0 {
-            return &mut [];
-        }
-
-        let grid_size = (self.row_no * self.col_no) as usize;
-        let start_idx = self.row_offset * self.col_no as usize;
-        let end_idx = (start_idx + grid_size).min(self.images.len());
-
-        if start_idx >= self.images.len() {
-            return &mut [];
-        }
-
-        self.images[start_idx..end_idx]
-            .iter()
-            .enumerate()
-            .for_each(|(val, img)| img.set_pos(val));
-
-        &self.images[start_idx..end_idx]
-    }
-
-    fn resize(&self) {
+    pub fn resize(&self) {
         let images = self.visible_grid_images().iter();
         let size = self.window_size.unwrap();
         self.state.as_ref().unwrap().resize(
@@ -337,7 +241,7 @@ impl App {
         );
     }
 
-    fn resize_fresh_images(&mut self) {
+    pub fn resize_fresh_images(&mut self) {
         let paths = self.image_loader_service.completed();
 
         if paths.len() > 0 {
@@ -417,8 +321,135 @@ impl App {
     }
 
     /// placeholder for developing on keymaps
-    fn noop(&mut self) {
+    pub fn noop(&mut self) {
         todo!()
+    }
+}
+
+// Setter methods:
+impl App {
+    pub fn set_cursor_idx(&mut self, value: usize) {
+        if self.cursor_idx != value {
+            self.cursor_idx = value;
+            self.ensure_cursor_visible();
+        }
+    }
+
+    pub fn set_row_no(&mut self, value: u32) {
+        if self.row_no != value {
+            self.row_no = value;
+            self.col_no_recalc();
+            self.ensure_cursor_visible();
+        }
+    }
+
+    pub fn set_row_offset(&mut self, value: usize) {
+        if self.row_offset != value {
+            self.row_offset = value;
+            self.bound_cursor_to_grid();
+        }
+    }
+
+    pub fn set_cursor_pos(&mut self, pos: PhysicalPosition<f64>) {
+        self.cursor_pos = Some(CursorPosition::new(pos.x, pos.y));
+    }
+
+    pub fn set_window_size(&mut self, size: PhysicalSize<u32>) {
+        self.window_size = Some(size);
+        self.col_no_recalc();
+        self.ensure_cursor_visible();
+    }
+}
+
+// Recalculation methods:
+// cannot use setter methods due to recursion, these should only be called from
+// within setters
+impl App {
+    fn col_no_recalc(&mut self) {
+        if let Some(size) = self.window_size {
+            let grid_height = size.height / self.row_no;
+            self.col_no = size.width / grid_height;
+        }
+    }
+
+    /// Bounds cursor_idx to be within the current visible grid
+    /// based on row_no, col_no, and row_offset.
+    /// This ensures the cursor doesn't exceed the grid boundaries.
+    fn bound_cursor_to_grid(&mut self) {
+        let grid_size = (self.row_no * self.col_no) as usize;
+        let grid_start = self.row_offset * self.col_no as usize;
+        let grid_end = (grid_start + grid_size).min(self.images.len());
+
+        if grid_start > grid_end.saturating_sub(1) {
+            self.cursor_idx = self.images.len().saturating_sub(1);
+        } else {
+            self.cursor_idx = self
+                .cursor_idx
+                .clamp(grid_start, grid_end.saturating_sub(1));
+        }
+    }
+
+    /// Updates row_offset to ensure the current cursor_idx is visible
+    /// in the grid. If cursor_idx is already visible, row_offset is unchanged.
+    fn ensure_cursor_visible(&mut self) {
+        if self.col_no == 0 {
+            return;
+        }
+
+        let cursor_row = self.cursor_idx / self.col_no as usize;
+        let visible_start_row = self.row_offset;
+        let visible_end_row = self.row_offset + self.row_no as usize;
+
+        if cursor_row < visible_start_row {
+            // Cursor is above visible area, scroll up
+            self.row_offset = cursor_row;
+        } else if cursor_row >= visible_end_row {
+            // Cursor is below visible area, scroll down
+            self.row_offset = cursor_row.saturating_sub(self.row_no as usize - 1);
+        }
+    }
+}
+
+// Helper methods:
+impl App {
+    fn get_rel_cursor_idx(&self) -> usize {
+        self.cursor_idx - (self.row_offset * self.col_no as usize)
+    }
+
+    fn get_drag_offset_ndc(&self) -> Option<(f64, f64)> {
+        match self {
+            Self {
+                window_size: Some(window_size),
+                drag_start_pos: Some((sx, sy)),
+                cursor_pos: Some(current),
+                ..
+            } => {
+                let (cx, cy) = current.to_ndc(window_size);
+                Some((cx.sub(sx), cy.sub(sy)))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn visible_grid_images(&self) -> &[LazyImage] {
+        if self.col_no == 0 || self.row_no == 0 {
+            return &mut [];
+        }
+
+        let grid_size = (self.row_no * self.col_no) as usize;
+        let start_idx = self.row_offset * self.col_no as usize;
+        let end_idx = (start_idx + grid_size).min(self.images.len());
+
+        if start_idx >= self.images.len() {
+            return &mut [];
+        }
+
+        self.images[start_idx..end_idx]
+            .iter()
+            .enumerate()
+            .for_each(|(val, img)| img.set_pos(val));
+
+        &self.images[start_idx..end_idx]
     }
 }
 
@@ -459,7 +490,7 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 tracing::debug!("Resize: {}x{}", size.width, size.height);
                 self.state.as_mut().unwrap().resize_surface(size);
-                self.update_window_size(size);
+                self.set_window_size(size);
                 self.resize();
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -478,7 +509,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.update_cursor_pos(position);
+                self.set_cursor_pos(position);
             }
             _ => {
                 self.last_window_event = Some(event);
@@ -492,7 +523,7 @@ impl ApplicationHandler for App {
                 }
 
                 if mutated {
-                    self.resize()
+                    self.resize();
                 }
             }
         }
