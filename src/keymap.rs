@@ -215,3 +215,188 @@ impl KeySpec {
         Keymap::new(func).with_kc(self.kc).with_mods(self.modifiers)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::keyboard::{KeyCode, ModifiersState};
+
+    #[test]
+    fn test_single_modifiers() {
+        // Control
+        let spec = KeySpec::new("C-a").unwrap();
+        assert_eq!(spec.kc, KeyCode::KeyA);
+        assert_eq!(spec.modifiers, ModifiersState::CONTROL);
+
+        // Shift
+        let spec = KeySpec::new("S-b").unwrap();
+        assert_eq!(spec.kc, KeyCode::KeyB);
+        assert_eq!(spec.modifiers, ModifiersState::SHIFT);
+
+        // Alt
+        let spec = KeySpec::new("A-c").unwrap();
+        assert_eq!(spec.kc, KeyCode::KeyC);
+        assert_eq!(spec.modifiers, ModifiersState::ALT);
+
+        // Super/Meta
+        let spec = KeySpec::new("M-d").unwrap();
+        assert_eq!(spec.kc, KeyCode::KeyD);
+        assert_eq!(spec.modifiers, ModifiersState::SUPER);
+    }
+
+    #[test]
+    fn test_multiple_modifiers() {
+        // Control + Shift
+        let spec = KeySpec::new("C-S-a").unwrap();
+        assert_eq!(spec.kc, KeyCode::KeyA);
+        assert_eq!(
+            spec.modifiers,
+            ModifiersState::CONTROL | ModifiersState::SHIFT
+        );
+
+        // Control + Alt
+        let spec = KeySpec::new("C-A-b").unwrap();
+        assert_eq!(spec.kc, KeyCode::KeyB);
+        assert_eq!(
+            spec.modifiers,
+            ModifiersState::CONTROL | ModifiersState::ALT
+        );
+
+        // Super + Shift
+        let spec = KeySpec::new("M-S-x").unwrap();
+        assert_eq!(spec.kc, KeyCode::KeyX);
+        assert_eq!(
+            spec.modifiers,
+            ModifiersState::SUPER | ModifiersState::SHIFT
+        );
+
+        // All modifiers
+        let spec = KeySpec::new("M-C-S-A-z").unwrap();
+        assert_eq!(spec.kc, KeyCode::KeyZ);
+        assert_eq!(
+            spec.modifiers,
+            ModifiersState::SUPER
+                | ModifiersState::CONTROL
+                | ModifiersState::SHIFT
+                | ModifiersState::ALT
+        );
+    }
+
+    #[test]
+    fn test_no_modifiers() {
+        let spec = KeySpec::new("a").unwrap();
+        assert_eq!(spec.kc, KeyCode::KeyA);
+        assert_eq!(spec.modifiers, ModifiersState::empty());
+
+        let spec = KeySpec::new("5").unwrap();
+        assert_eq!(spec.kc, KeyCode::Digit5);
+        assert_eq!(spec.modifiers, ModifiersState::empty());
+    }
+
+    #[test]
+    fn test_special_keys_with_modifiers() {
+        // Control + Return
+        let spec = KeySpec::new("C-RET").unwrap();
+        assert_eq!(spec.kc, KeyCode::Enter);
+        assert_eq!(spec.modifiers, ModifiersState::CONTROL);
+
+        // Shift + Space
+        let spec = KeySpec::new("S-SPC").unwrap();
+        assert_eq!(spec.kc, KeyCode::Space);
+        assert_eq!(spec.modifiers, ModifiersState::SHIFT);
+
+        // Alt + Escape
+        let spec = KeySpec::new("A-ESC").unwrap();
+        assert_eq!(spec.kc, KeyCode::Escape);
+        assert_eq!(spec.modifiers, ModifiersState::ALT);
+
+        // Control + Shift + Tab
+        let spec = KeySpec::new("C-S-TAB").unwrap();
+        assert_eq!(spec.kc, KeyCode::Tab);
+        assert_eq!(
+            spec.modifiers,
+            ModifiersState::CONTROL | ModifiersState::SHIFT
+        );
+    }
+
+    #[test]
+    fn test_function_keys() {
+        let spec = KeySpec::new("f11").unwrap();
+        assert_eq!(spec.kc, KeyCode::F11);
+        assert_eq!(spec.modifiers, ModifiersState::empty());
+
+        let spec = KeySpec::new("C-f5").unwrap();
+        assert_eq!(spec.kc, KeyCode::F5);
+        assert_eq!(spec.modifiers, ModifiersState::CONTROL);
+
+        let spec = KeySpec::new("M-A-f12").unwrap();
+        assert_eq!(spec.kc, KeyCode::F12);
+        assert_eq!(spec.modifiers, ModifiersState::SUPER | ModifiersState::ALT);
+    }
+
+    #[test]
+    fn test_digits_with_modifiers() {
+        let spec = KeySpec::new("C-1").unwrap();
+        assert_eq!(spec.kc, KeyCode::Digit1);
+        assert_eq!(spec.modifiers, ModifiersState::CONTROL);
+
+        let spec = KeySpec::new("M-S-9").unwrap();
+        assert_eq!(spec.kc, KeyCode::Digit9);
+        assert_eq!(
+            spec.modifiers,
+            ModifiersState::SUPER | ModifiersState::SHIFT
+        );
+    }
+
+    #[test]
+    fn test_symbols_with_modifiers() {
+        let spec = KeySpec::new("C-;").unwrap();
+        assert_eq!(spec.kc, KeyCode::Semicolon);
+        assert_eq!(spec.modifiers, ModifiersState::CONTROL);
+
+        let spec = KeySpec::new("S-[").unwrap();
+        assert_eq!(spec.kc, KeyCode::BracketLeft);
+        assert_eq!(spec.modifiers, ModifiersState::SHIFT);
+
+        let spec = KeySpec::new("C-/").unwrap();
+        assert_eq!(spec.kc, KeyCode::Slash);
+        assert_eq!(spec.modifiers, ModifiersState::CONTROL);
+    }
+
+    #[test]
+    fn test_arrow_keys_with_modifiers() {
+        let spec = KeySpec::new("C-up").unwrap();
+        assert_eq!(spec.kc, KeyCode::ArrowUp);
+        assert_eq!(spec.modifiers, ModifiersState::CONTROL);
+
+        let spec = KeySpec::new("S-A-left").unwrap();
+        assert_eq!(spec.kc, KeyCode::ArrowLeft);
+        assert_eq!(spec.modifiers, ModifiersState::SHIFT | ModifiersState::ALT);
+    }
+
+    #[test]
+    fn test_error_cases() {
+        // Empty string
+        assert!(matches!(
+            KeySpec::new(""),
+            Err(Error::NoNoneWhitespaceChars)
+        ));
+
+        // Only whitespace
+        assert!(matches!(
+            KeySpec::new("   "),
+            Err(Error::NoNoneWhitespaceChars)
+        ));
+
+        // Unrecognized key
+        assert!(matches!(
+            KeySpec::new("C-unknown"),
+            Err(Error::UnrecognizedKey(_))
+        ));
+
+        assert!(matches!(
+            KeySpec::new("notakey"),
+            Err(Error::UnrecognizedKey(_))
+        ));
+    }
+}
