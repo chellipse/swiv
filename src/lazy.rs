@@ -251,12 +251,9 @@ impl GenericImage {
 #[derive(Debug)]
 pub struct RenderableImage {
     bind_group: BindGroup,
-    vertex_buffer: Option<Buffer>,
-    device: Device,
+    vertex_buffer: LazyVertexBuffer,
     width: u32,
     height: u32,
-    mapped: Arc<AtomicBool>,
-    waiting_to_resize: Option<Vertices>,
 }
 
 impl RenderableImage {
@@ -327,12 +324,9 @@ impl RenderableImage {
 
         Self {
             bind_group,
-            vertex_buffer: None,
-            device: device.clone(),
+            vertex_buffer: LazyVertexBuffer::new(device),
             width: img.width,
             height: img.height,
-            mapped: Arc::new(AtomicBool::new(false)),
-            waiting_to_resize: None,
         }
     }
 
@@ -345,23 +339,56 @@ impl RenderableImage {
     }
 
     pub fn render(&mut self, renderpass: &mut RenderPass) {
-        if let Some(func) = std::mem::replace(&mut self.waiting_to_resize, None) {
-            self.resize(func);
-            return;
-        }
-
-        // Only render if vertex buffer is initialized
-        if let Some(vertex_buffer) = &self.vertex_buffer {
-            if !self.mapped.load(Ordering::Acquire) {
-                renderpass.set_bind_group(0, &self.bind_group, &[]);
-                renderpass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                renderpass.draw(0..6, 0..1);
-            }
+        if let Some(vertex_buffer) = &self.vertex_buffer.get() {
+            renderpass.set_bind_group(0, &self.bind_group, &[]);
+            renderpass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            renderpass.draw(0..6, 0..1);
         }
     }
 
     pub fn resize(&mut self, vertices: Vertices) {
-        // tracing::debug!("{vertices:?}");
+        self.vertex_buffer.resize(vertices);
+    }
+}
+
+#[derive(Debug)]
+pub struct LazyVertexBuffer {
+    device: Device,
+    vertex_buffer: Option<Buffer>,
+    mapped: Arc<AtomicBool>,
+    waiting_to_resize: Option<Vertices>,
+}
+
+impl LazyVertexBuffer {
+    pub fn new(device: &Device) -> Self {
+        Self {
+            vertex_buffer: None,
+            device: device.clone(),
+            mapped: Arc::new(AtomicBool::new(false)),
+            waiting_to_resize: None,
+        }
+    }
+
+    pub fn get(&mut self) -> Option<&Buffer> {
+        if let Some(vertices) = std::mem::replace(&mut self.waiting_to_resize, None) {
+            self.resize(vertices);
+            // NOTE: if we don't return here than it can cause an invalid state
+            // since between the read of self.mapped in self.resize and the read
+            // of self.mapped in this function, the blocking callback could complete
+            // meaning we would return a dirty vertex buffer
+            return None;
+        }
+
+        if let Some(buffer) = &self.vertex_buffer
+            && !self.mapped.load(Ordering::Acquire)
+        {
+            Some(buffer)
+        } else {
+            None
+        }
+    }
+
+    pub fn resize(&mut self, vertices: Vertices) {
         // Initialize vertex buffer on first resize if not already created
         if self.vertex_buffer.is_none() {
             self.vertex_buffer = Some(self.device.create_buffer_init(
