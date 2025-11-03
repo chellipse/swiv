@@ -289,6 +289,10 @@ impl State {
         self.surface.configure(&self.device, &surface_config);
     }
 
+    pub fn set_title(&self, title: &str) {
+        self.window.set_title(title);
+    }
+
     fn apply_op_to_image_states<'a>(
         &self,
         images: impl Iterator<Item = &'a LazyImage>,

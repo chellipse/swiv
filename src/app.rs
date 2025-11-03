@@ -358,6 +358,10 @@ impl App {
         if self.cursor_idx != value {
             self.cursor_idx = value;
             self.ensure_cursor_visible();
+            if let Some(path) = self.images[self.cursor_idx].path().as_os_str().to_str() {
+                let title = format!("{}: {}", env!("CARGO_PKG_NAME"), path);
+                self.state.as_ref().unwrap().set_title(&title);
+            }
         }
     }
 
@@ -484,7 +488,7 @@ impl ApplicationHandler for App {
         tracing::debug!("Creating window...");
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes())
+                .create_window(Window::default_attributes().with_title(env!("CARGO_PKG_NAME")))
                 .unwrap(),
         );
 
