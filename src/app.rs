@@ -301,6 +301,10 @@ impl App {
             self.exit_msg("No images left to display. aborting".to_string());
         }
 
+        if self.cursor_idx >= self.images.len() {
+            self.set_cursor_idx(self.images.len() - 1);
+        }
+
         let non_err_paths: Vec<_> = paths
             .into_iter()
             .filter(|(_, was_err)| !*was_err)
