@@ -7,7 +7,7 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
-    event::{MouseScrollDelta, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::ModifiersState,
     window::{Window, WindowId},
@@ -41,12 +41,13 @@ static KEYMAPS: LazyLock<Vec<Keymap<App>>> = LazyLock::new(|| {
         KeySpec::new("S-g").unwrap().to_bind(App::go_bottom),
         // gallery
         KeySpec::new("-").unwrap().to_bind(App::row_no_increase).with_mode(Mode::Gallery),
-        KeySpec::new("S-=").unwrap().to_bind(App::row_no_reset).with_mode(Mode::Gallery), // '+'
-        KeySpec::new("=").unwrap().to_bind(App::row_no_decrease).with_mode(Mode::Gallery),
+        KeySpec::new("S-=").unwrap().to_bind(App::row_no_decrease).with_mode(Mode::Gallery), // '+'
+        KeySpec::new("=").unwrap().to_bind(App::row_no_reset).with_mode(Mode::Gallery),
         // single
-        KeySpec::new("-").unwrap().to_bind(App::noop).with_mode(Mode::SingleImage),
-        KeySpec::new("S-=").unwrap().to_bind(App::noop).with_mode(Mode::SingleImage), // '+'
-        KeySpec::new("=").unwrap().to_bind(App::noop).with_mode(Mode::SingleImage),
+        KeySpec::new("r").unwrap().to_bind(App::full_reset).with_mode(Mode::SingleImage),
+        KeySpec::new("-").unwrap().to_bind(App::zoom_out).with_mode(Mode::SingleImage),
+        KeySpec::new("S-=").unwrap().to_bind(App::zoom_in).with_mode(Mode::SingleImage), // '+'
+        KeySpec::new("=").unwrap().to_bind(App::zoom_reset).with_mode(Mode::SingleImage),
     ];
 
     x
@@ -67,22 +68,52 @@ impl Mode {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct CursorPosition {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Point2 {
     pub x: f64,
     pub y: f64,
 }
 
-impl CursorPosition {
+impl Point2 {
     pub fn new(x: f64, y: f64) -> Self {
         Self { x, y }
     }
 
     /// Convert to normalized device coordinates (-1.0 to 1.0)
-    pub fn to_ndc(&self, window_size: &PhysicalSize<u32>) -> (f64, f64) {
+    pub fn to_ndc(&self, window_size: &PhysicalSize<u32>) -> Self {
         let ndc_x = (self.x / window_size.width as f64) * 2.0 - 1.0;
         let ndc_y = 1.0 - (self.y / window_size.height as f64) * 2.0;
-        (ndc_x, ndc_y)
+        Self::new(ndc_x, ndc_y)
+    }
+
+    /// Convert from normalized device coordinates (-1.0 to 1.0) back to screen coordinates
+    pub fn from_ndc(ndc_x: f64, ndc_y: f64, window_size: &PhysicalSize<u32>) -> Self {
+        let x = (ndc_x + 1.0) * 0.5 * window_size.width as f64;
+        let y = (1.0 - ndc_y) * 0.5 * window_size.height as f64;
+        Self::new(x, y)
+    }
+}
+
+impl Add for Point2 {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self::new(self.x + rhs.x, self.y + rhs.y)
+    }
+}
+
+impl Sub for Point2 {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self::new(self.x - rhs.x, self.y - rhs.y)
+    }
+}
+
+impl AddAssign for Point2 {
+    fn add_assign(&mut self, rhs: Self) {
+        self.x += rhs.x;
+        self.y += rhs.y;
     }
 }
 
@@ -101,21 +132,27 @@ pub struct App {
     modifiers: ModifiersState,
     window_size: Option<PhysicalSize<u32>>,
     // last literal screen cursor position
-    cursor_pos: Option<CursorPosition>,
+    cursor_pos: Option<Point2>,
 
     // ui state
     mode: Mode,
+    /// - must be bounded within [`Self::images`], which changes in size (during error removal)
+    /// - must be dragged by [`Self::row_offset`]
+    cursor_idx: usize,
+
+    // gallery mode state
     /// changed via user input
     /// see: [`Self::ROW_NO_MIN`] and [`Self::ROW_NO_MAX`]
     row_no: u32,
     /// computed from window dimensions and [`Self::row_no`]
     col_no: u32,
-    /// - must be bounded within [`Self::images`], which changes in size (during error removal)
-    /// - must be dragged by [`Self::row_offset`]
-    cursor_idx: usize,
-    /// - must be dragged by [`Self::selection_idx`]
+    /// - must be dragged by [`Self::cursor_idx`]
     row_offset: usize,
-    drag_start_pos: Option<(f64, f64)>,
+
+    // single image mode state
+    drag_start_pos: Option<Point2>,
+    drag_total: Point2,
+    scale: f32,
 
     // switches
     exiting: bool,
@@ -161,11 +198,13 @@ impl App {
             modifiers: ModifiersState::empty(),
             cursor_pos: None,
             drag_start_pos: None,
+            drag_total: Point2::new(0.0, 0.0),
             cursor_idx: 0,
             row_offset: 0,
             exiting,
             exit_msg: None,
             sys,
+            scale: 1.0,
         }
     }
 
@@ -183,8 +222,7 @@ impl App {
     }
 
     pub fn toggle_mode(&mut self) {
-        todo!();
-        // self.mode.toggle();
+        self.mode.toggle();
     }
 
     pub fn row_no_reset(&mut self) {
@@ -239,9 +277,19 @@ impl App {
         );
     }
 
-    /// TODO what happens if window size changes while drag is in progress?
-    /// FIX store it as NDC
-    pub fn start_drag(&mut self) {
+    pub fn zoom_reset(&mut self) {
+        self.scale = 1.0;
+    }
+
+    pub fn zoom_in(&mut self) {
+        self.scale *= 1.1;
+    }
+
+    pub fn zoom_out(&mut self) {
+        self.scale *= 0.9;
+    }
+
+    pub fn drag_start(&mut self) {
         if let Some(cursor) = &self.cursor_pos
             && let Some(size) = &self.window_size
         {
@@ -249,17 +297,48 @@ impl App {
         }
     }
 
+    pub fn drag_stop(&mut self) {
+        if let Some(offset) = &self.get_drag_offset_ndc() {
+            self.drag_total += *offset;
+        }
+        self.drag_start_pos = None;
+    }
+
+    pub fn full_reset(&mut self) {
+        self.drag_start_pos = None;
+        self.drag_total = Point2::default();
+        self.zoom_reset();
+    }
+
     pub fn resize(&self) {
-        let images = self.visible_grid_images().iter();
         let size = self.window_size.unwrap();
-        self.state.as_ref().unwrap().resize(
-            images,
-            size.width as f32,
-            size.height as f32,
-            self.row_no as f32,
-            self.col_no as f32,
-            self.get_rel_cursor_idx() as f32,
-        );
+
+        match self.mode {
+            Mode::Gallery => {
+                let images = self.visible_grid_images().iter();
+                self.state.as_ref().unwrap().resize(
+                    images,
+                    size.width as f32,
+                    size.height as f32,
+                    self.row_no as f32,
+                    self.col_no as f32,
+                    self.get_rel_cursor_idx() as f32,
+                );
+            }
+            Mode::SingleImage => {
+                let image = &self.images[self.cursor_idx];
+                let mut offset = self.get_drag_offset_ndc().unwrap_or_default();
+                offset += self.drag_total;
+                self.state.as_ref().unwrap().resize_single_image(
+                    image,
+                    size.width as f32,
+                    size.height as f32,
+                    self.scale,
+                    offset.x as f32,
+                    offset.y as f32,
+                );
+            }
+        }
     }
 
     pub fn resize_fresh_images(&mut self) {
@@ -331,19 +410,28 @@ impl App {
             .map(|(path, _)| path)
             .collect();
 
-        let images = self
-            .visible_grid_images()
-            .iter()
-            .filter(|img| non_err_paths.contains(img.path()));
-        let size = self.window_size.unwrap();
-        self.state.as_ref().unwrap().resize(
-            images,
-            size.width as f32,
-            size.height as f32,
-            self.row_no as f32,
-            self.col_no as f32,
-            self.get_rel_cursor_idx() as f32,
-        );
+        match self.mode {
+            Mode::Gallery => {
+                let images = self
+                    .visible_grid_images()
+                    .iter()
+                    .filter(|img| non_err_paths.contains(img.path()));
+                let size = self.window_size.unwrap();
+                self.state.as_ref().unwrap().resize(
+                    images,
+                    size.width as f32,
+                    size.height as f32,
+                    self.row_no as f32,
+                    self.col_no as f32,
+                    self.get_rel_cursor_idx() as f32,
+                );
+            }
+            Mode::SingleImage => {
+                if non_err_paths.contains(&self.images[self.cursor_idx].path()) {
+                    self.resize();
+                }
+            }
+        }
     }
 
     /// placeholder for developing on keymaps
@@ -381,7 +469,10 @@ impl App {
     }
 
     pub fn set_cursor_pos(&mut self, pos: PhysicalPosition<f64>) {
-        self.cursor_pos = Some(CursorPosition::new(pos.x, pos.y));
+        self.cursor_pos = Some(Point2::new(pos.x, pos.y));
+        if self.mode == Mode::SingleImage && self.drag_start_pos.is_some() {
+            self.resize()
+        }
     }
 
     pub fn set_window_size(&mut self, size: PhysicalSize<u32>) {
@@ -446,16 +537,16 @@ impl App {
         self.cursor_idx - (self.row_offset * self.col_no as usize)
     }
 
-    fn get_drag_offset_ndc(&self) -> Option<(f64, f64)> {
+    fn get_drag_offset_ndc(&self) -> Option<Point2> {
         match self {
             Self {
                 window_size: Some(window_size),
-                drag_start_pos: Some((sx, sy)),
+                drag_start_pos: Some(start),
                 cursor_pos: Some(current),
                 ..
             } => {
-                let (cx, cy) = current.to_ndc(window_size);
-                Some((cx.sub(sx), cy.sub(sy)))
+                let current_ndc = current.to_ndc(window_size);
+                Some(current_ndc - *start)
             }
             _ => None,
         }
@@ -513,8 +604,21 @@ impl ApplicationHandler for App {
                 }
 
                 self.resize_fresh_images();
-                let images = self.visible_grid_images().iter();
-                self.state.as_ref().unwrap().render(images);
+
+                match self.mode {
+                    Mode::Gallery => {
+                        let images = self.visible_grid_images().iter();
+                        self.state.as_ref().unwrap().render(images, true);
+                    }
+                    Mode::SingleImage => {
+                        let image = &self.images[self.cursor_idx];
+                        self.state
+                            .as_ref()
+                            .unwrap()
+                            .render(std::iter::once(image), false);
+                    }
+                }
+
                 self.state.as_ref().unwrap().request_redraw();
             }
             WindowEvent::Resized(size) => {
@@ -523,19 +627,42 @@ impl ApplicationHandler for App {
                 self.set_window_size(size);
                 self.resize();
             }
+            WindowEvent::MouseInput { state, button, .. } => match button {
+                MouseButton::Left => match state {
+                    ElementState::Pressed => self.drag_start(),
+                    ElementState::Released => self.drag_stop(),
+                },
+                _ => {}
+            },
             WindowEvent::MouseWheel { delta, .. } => {
-                // tracing::error!("Delta: {delta:?}");
-                match delta {
-                    MouseScrollDelta::LineDelta(_, y) => {
-                        if y > 0.0 {
-                            self.row_offset_decrease();
-                            self.resize();
-                        } else {
-                            self.row_offset_increase();
-                            self.resize();
-                        }
+                // tracing::debug!("Delta: {delta:?}");
+                let mut need_resize = true;
+                match (self.mode, delta) {
+                    (Mode::Gallery, MouseScrollDelta::LineDelta(_, y)) if y.is_sign_positive() => {
+                        self.row_offset_decrease();
                     }
-                    MouseScrollDelta::PixelDelta(_) => {}
+                    (Mode::Gallery, MouseScrollDelta::LineDelta(_, y)) if y.is_sign_negative() => {
+                        self.row_offset_increase();
+                    }
+                    (Mode::SingleImage, MouseScrollDelta::LineDelta(_, y))
+                        if y.is_sign_positive() =>
+                    {
+                        self.zoom_in();
+                    }
+                    (Mode::SingleImage, MouseScrollDelta::LineDelta(_, y))
+                        if y.is_sign_negative() =>
+                    {
+                        self.zoom_out();
+                    }
+                    (Mode::SingleImage, MouseScrollDelta::PixelDelta(pos)) => {
+                        let delta = pos.y as f32 / self.window_size.unwrap().height as f32;
+                        self.scale += delta;
+                    }
+                    _ => need_resize = false,
+                }
+
+                if need_resize {
+                    self.resize();
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {

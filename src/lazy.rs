@@ -596,4 +596,23 @@ impl Vertices {
             .right(-unit_width + (unit_width / 2.5))
             .transpose(col_offset * cell_width, -row_offset * cell_height)
     }
+
+    pub fn single_image(
+        self,
+        ww: f32,
+        wh: f32,
+        iw: f32,
+        ih: f32,
+        scale_factor: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Self {
+        self.top(1.0)
+            .bot(-1.0)
+            .left(-1.0)
+            .right(1.0)
+            .aspect(iw.div(ih) / ww.div(wh))
+            .scale(scale_factor)
+            .transpose(offset_x, offset_y)
+    }
 }

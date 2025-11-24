@@ -305,6 +305,9 @@ impl State {
         {
             let mut map = self.image_state_map.borrow_mut();
 
+            // NOTE: we could use the entry api here however that would require
+            // us to clone path even when the entry already exists, which is hot
+            // path. so we don't
             match map.get_mut(path) {
                 Some(renderable) => {
                     func(renderable, pos);
@@ -347,7 +350,45 @@ impl State {
         let _ = self.device.poll(PollType::Wait);
     }
 
-    pub fn render<'a>(&self, images: impl Iterator<Item = &'a LazyImage>) {
+    pub fn resize_single_image<'a>(
+        &self,
+        image: &'a LazyImage,
+        ww: f32,
+        wh: f32,
+        scale_factor: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) {
+        if let Some(Ok(img)) = image.get() {
+            let mut map = self.image_state_map.borrow_mut();
+
+            let renderable = map.entry(image.path().clone()).or_insert_with(|| {
+                RenderableImage::new(
+                    &img,
+                    &self.device,
+                    &self.queue,
+                    &self.bind_group_layout,
+                    &self.sampler,
+                )
+            });
+
+            let iw = renderable.width() as f32;
+            let ih = renderable.height() as f32;
+            renderable.resize(Vertices::new().single_image(
+                ww,
+                wh,
+                iw,
+                ih,
+                scale_factor,
+                offset_x,
+                offset_y,
+            ));
+
+            let _ = self.device.poll(PollType::Wait);
+        }
+    }
+
+    pub fn render<'a>(&self, images: impl Iterator<Item = &'a LazyImage>, show_cursor: bool) {
         let surface_texture = self
             .surface
             .get_current_texture()
@@ -382,13 +423,15 @@ impl State {
             renderable.render(&mut renderpass);
         });
 
-        if let Some(buffer) = self.cursor_buffer.borrow_mut().get() {
-            renderpass.set_pipeline(&self.invert_pipeline);
-            renderpass.set_bind_group(0, &self.cursor_bind_group, &[]);
-            renderpass.set_vertex_buffer(0, buffer.slice(..));
-            renderpass.draw(0..6, 0..1);
-        } else {
-            tracing::warn!("No cursor buffer");
+        if show_cursor {
+            if let Some(buffer) = self.cursor_buffer.borrow_mut().get() {
+                renderpass.set_pipeline(&self.invert_pipeline);
+                renderpass.set_bind_group(0, &self.cursor_bind_group, &[]);
+                renderpass.set_vertex_buffer(0, buffer.slice(..));
+                renderpass.draw(0..6, 0..1);
+            } else {
+                tracing::warn!("No cursor buffer");
+            }
         }
 
         drop(renderpass);
