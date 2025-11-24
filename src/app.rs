@@ -392,7 +392,10 @@ impl App {
                 true
             }
         });
-        if len - self.images.len() > 0 {
+
+        let were_images_removed = len - self.images.len() > 0;
+
+        if were_images_removed {
             tracing::debug!("Retain removed {} paths", len - self.images.len());
         }
 
@@ -415,7 +418,7 @@ impl App {
                 let images = self
                     .visible_grid_images()
                     .iter()
-                    .filter(|img| non_err_paths.contains(img.path()));
+                    .filter(|img| were_images_removed || non_err_paths.contains(img.path()));
                 let size = self.window_size.unwrap();
                 self.state.as_ref().unwrap().resize(
                     images,
