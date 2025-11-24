@@ -164,7 +164,7 @@ impl App {
     const ROW_NO_MAX: u32 = 32;
     const ROW_NO_DEFAULT: u32 = 4;
 
-    pub fn new(paths: Vec<PathBuf>) -> Self {
+    pub fn new(paths: Vec<PathBuf>, cursor_idx: Option<usize>) -> Self {
         let image_loader_service = ImageLoaderService::new(0);
 
         tracing::info!("Path count: {}", paths.len());
@@ -186,12 +186,19 @@ impl App {
 
         let sys = sysinfo::System::new_all();
 
+        let mode = match cursor_idx {
+            Some(_) => Mode::SingleImage,
+            None => Mode::Gallery,
+        };
+
+        let cursor_idx = cursor_idx.unwrap_or(0);
+
         Self {
             state: None,
             images,
             image_loader_service,
             last_window_event: None,
-            mode: Mode::Gallery,
+            mode,
             row_no: Self::ROW_NO_DEFAULT,
             col_no: 1,
             window_size: None,
@@ -199,7 +206,7 @@ impl App {
             cursor_pos: None,
             drag_start_pos: None,
             drag_total: Point2::new(0.0, 0.0),
-            cursor_idx: 0,
+            cursor_idx,
             row_offset: 0,
             exiting,
             exit_msg: None,

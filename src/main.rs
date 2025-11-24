@@ -43,12 +43,15 @@ struct Cli {
 }
 
 impl Cli {
-    fn get_paths(&self) -> Result<Vec<PathBuf>> {
+    fn get_paths(&self) -> Result<(Vec<PathBuf>, Option<usize>)> {
         let recursion = self.recursive.then_some(self.recursion_limit).unwrap_or(0);
 
-        let target = match self.target.metadata()?.is_dir() {
-            true => self.target.clone(),
-            false => self.target.parent().ok_or(anyhow!("None"))?.to_path_buf(),
+        let (target, cursor_entry) = match self.target.metadata()?.is_dir() {
+            true => (self.target.clone(), None),
+            false => (
+                self.target.parent().ok_or(anyhow!("None"))?.to_path_buf(),
+                Some(self.target.clone()),
+            ),
         };
 
         let mut iter: Box<dyn Iterator<Item = _>> =
@@ -75,7 +78,13 @@ impl Cli {
             }));
         };
 
-        Ok(iter.collect())
+        let paths: Vec<_> = iter.collect();
+
+        let cursor_idx = cursor_entry
+            .and_then(|x| paths.iter().enumerate().find(|(_, y)| x == **y))
+            .map(|(idx, _)| idx);
+
+        Ok((paths, cursor_idx))
     }
 
     fn open_dir(
@@ -139,7 +148,7 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let cli = Cli::parse();
-    let paths = match cli.get_paths() {
+    let (paths, cursor_idx) = match cli.get_paths() {
         Ok(x) => x,
         Err(e) => {
             tracing::error!("{e} from {:?}", cli.target);
@@ -147,7 +156,7 @@ fn main() {
         }
     };
 
-    let mut app = App::new(paths);
+    let mut app = App::new(paths, cursor_idx);
     event_loop.run_app(&mut app).unwrap();
 }
 
