@@ -2455,6 +2455,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "swiv"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "chrono",
+ "clap",
+ "crossbeam-channel",
+ "image",
+ "itertools 0.14.0",
+ "lcms2",
+ "lexical-sort",
+ "nu-ansi-term",
+ "pollster",
+ "sysinfo",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
+ "tracing",
+ "tracing-appender",
+ "tracing-log",
+ "tracing-subscriber",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2832,32 +2858,6 @@ name = "unicode-width"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a1a07cc7db3810833284e8d372ccdc6da29741639ecc70c9ec107df0fa6154c"
-
-[[package]]
-name = "untitled-image-viewer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "chrono",
- "clap",
- "crossbeam-channel",
- "image",
- "itertools 0.14.0",
- "lcms2",
- "lexical-sort",
- "nu-ansi-term",
- "pollster",
- "sysinfo",
- "tikv-jemalloc-sys",
- "tikv-jemallocator",
- "tracing",
- "tracing-appender",
- "tracing-log",
- "tracing-subscriber",
- "wgpu",
- "winit",
-]
 
 [[package]]
 name = "utf8parse"

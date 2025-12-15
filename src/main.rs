@@ -9,7 +9,7 @@ use clap::Parser;
 use itertools::Itertools;
 use winit::event_loop::{ControlFlow, EventLoop};
 
-use untitled_image_viewer::{app::App, tracing_format::CustomFormat};
+use swiv::{app::App, tracing_format::CustomFormat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {

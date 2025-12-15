@@ -46,7 +46,7 @@
     in
     {
       packages.${system}.default = rustPlatform.buildRustPackage rec {
-        pname = "untitled-image-viewer";
+        pname = "swiv";
         version = "0.1.0";
 
         src = pkgs.lib.cleanSourceWith {
