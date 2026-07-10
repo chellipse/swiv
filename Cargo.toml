@@ -28,8 +28,9 @@ tracing = "0.1"
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 sysinfo = "0.37.2"
-tikv-jemallocator = "0.6.1"
+tikv-jemallocator = { version = "0.6.1", features = ["stats"] }
 tikv-jemalloc-sys = "0.6.1"
+tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"] }
 nu-ansi-term = "0.50.3"
 tracing-log = "0.2.0"
 chrono = "0.4.42"

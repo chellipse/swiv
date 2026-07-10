@@ -43,6 +43,13 @@
 
       libPath = pkgs.lib.makeLibraryPath inputs;
 
+      # for the uv scripts in scripts/
+      pythonEnv = pkgs.python3.withPackages (
+        ps: with ps; [
+          uv
+        ]
+      );
+
     in
     {
       packages.${system}.default = rustPlatform.buildRustPackage rec {
@@ -73,6 +80,7 @@
         nativeBuildInputs = [
           rust
           pkgs.pkg-config
+          pythonEnv
         ];
 
         buildInputs = inputs;
@@ -80,6 +88,17 @@
         # wanted to avoid setting RUSTFLAGS for this but using LD_LIBRARY_PATH
         # makes checking whether builds work possibly confusing
         RUSTFLAGS = "-C link-arg=-Wl,-rpath,${libPath}";
+
+        env = {
+          UV_PYTHON_DOWNLOADS = "never";
+          UV_NO_MANAGED_PYTHON = "1";
+          # manylinux wheels (numpy et al) need these at runtime; scoped to
+          # libs the rust build doesn't link so rpath issues stay visible
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+            pkgs.stdenv.cc.cc.lib
+            pkgs.zlib
+          ];
+        };
       };
     };
 }

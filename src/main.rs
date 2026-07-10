@@ -40,6 +40,12 @@ struct Cli {
     /// Do not ignore hidden files
     #[arg(long)]
     no_ignore: bool,
+
+    /// Sample jemalloc's allocated bytes every 10ms and append them to this
+    /// file as "wallclock-millisecond-ts,allocated-in-bytes" lines.
+    /// The file is truncated at startup
+    #[arg(long)]
+    mem_usage_csv_path: Option<PathBuf>,
 }
 
 impl Cli {
@@ -131,6 +137,58 @@ impl Cli {
     }
 }
 
+/// Samples jemalloc's `stats.allocated` every 10ms into a csv of
+/// "wallclock-millisecond-ts,allocated-in-bytes" lines.
+///
+/// Writes are deliberately unbuffered: the app terminates via
+/// [`std::process::exit`], which would discard anything sitting in a
+/// [`std::io::BufWriter`].
+fn spawn_mem_logger(path: PathBuf) {
+    use std::io::Write;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    std::thread::spawn(move || {
+        let mut file = match std::fs::File::create(&path) {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::error!("Failed to create mem usage csv at {path:?}: {e}");
+                return;
+            }
+        };
+
+        let (Ok(epoch), Ok(allocated)) = (
+            tikv_jemalloc_ctl::epoch::mib(),
+            tikv_jemalloc_ctl::stats::allocated::mib(),
+        ) else {
+            tracing::error!("Failed to look up jemalloc stat mibs");
+            return;
+        };
+
+        loop {
+            // jemalloc stats are cached and only refresh when the epoch is
+            // advanced
+            let _ = epoch.advance();
+
+            let Ok(bytes) = allocated.read() else {
+                tracing::error!("Failed to read jemalloc stats.allocated");
+                return;
+            };
+
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+
+            if let Err(e) = writeln!(file, "{ts},{bytes}") {
+                tracing::error!("Failed to write to mem usage csv: {e}");
+                return;
+            }
+
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+}
+
 fn main() {
     let (stdout, _guard) = tracing_appender::non_blocking(std::io::stdout());
 
@@ -148,6 +206,11 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let cli = Cli::parse();
+
+    if let Some(path) = cli.mem_usage_csv_path.clone() {
+        spawn_mem_logger(path);
+    }
+
     let (paths, cursor_idx) = match cli.get_paths() {
         Ok(x) => x,
         Err(e) => {
