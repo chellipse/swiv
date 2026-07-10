@@ -1,9 +1,11 @@
 use std::{
+    collections::HashSet,
     ops::*,
     path::PathBuf,
     sync::{Arc, LazyLock},
 };
 
+use itertools::{Either, Itertools};
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
@@ -383,12 +385,12 @@ impl App {
             }
         }
 
-        let err_paths: Vec<_> = paths
-            .clone()
+        let (err_paths, non_err_paths): (HashSet<_>, HashSet<_>) = paths
             .into_iter()
-            .filter(|(_, was_err)| *was_err)
-            .map(|(path, _)| path)
-            .collect();
+            .partition_map(|(path, was_err)| match was_err {
+                true => Either::Left(path),
+                false => Either::Right(path),
+            });
 
         let len = self.images.len();
         self.images.retain(|x| {
@@ -414,12 +416,6 @@ impl App {
             self.set_cursor_idx(self.images.len() - 1);
         }
 
-        let non_err_paths: Vec<_> = paths
-            .into_iter()
-            .filter(|(_, was_err)| !*was_err)
-            .map(|(path, _)| path)
-            .collect();
-
         match self.mode {
             Mode::Gallery => {
                 let images = self
@@ -437,7 +433,7 @@ impl App {
                 );
             }
             Mode::SingleImage => {
-                if non_err_paths.contains(&self.images[self.cursor_idx].path()) {
+                if non_err_paths.contains(self.images[self.cursor_idx].path()) {
                     self.resize();
                 }
             }
