@@ -69,6 +69,20 @@ impl ImageCache {
         }
     }
 
+    /// Read-only lookup of the best resident renderable for `class`: no
+    /// requests are issued and no in-flight decodes are polled.
+    ///
+    /// The render path must use this rather than [`Self::get_renderable`]:
+    /// state only advances via the resize paths, which lay out vertices
+    /// immediately after an upload, so a renderable with an uninitialized
+    /// vertex buffer (which would skip its draw and flicker for a frame) can
+    /// never reach a render pass.
+    pub fn get_resident(&mut self, path: &Path, class: LoadClass) -> Option<&mut RenderableImage> {
+        let classes = self.entries.get_mut(path)?;
+        let best = Self::best_resident(classes, class)?;
+        classes.get_mut(&best).unwrap().gpu.as_mut()
+    }
+
     /// Advances the load state for `path` and returns the best renderable
     /// for `class`: requests a load on first sight, polls in-flight requests,
     /// and uploads via `upload` once bytes are available.
@@ -76,6 +90,9 @@ impl ImageCache {
     /// While the wanted class isn't resident, the nearest resident class is
     /// returned instead, so cells show a re-scaled stand-in rather than
     /// nothing during bucket transitions.
+    ///
+    /// Callers must lay out vertices on the returned renderable; see
+    /// [`Self::get_resident`].
     pub fn get_renderable(
         &mut self,
         path: &Path,
@@ -128,14 +145,20 @@ impl ImageCache {
             }
         }
 
-        // the wanted class when resident, else the nearest resident
-        // fallback, preferring sharper-than-wanted over blurrier-than-wanted
-        let best = classes
+        let best = Self::best_resident(classes, class)?;
+        classes.get_mut(&best).unwrap().gpu.as_mut()
+    }
+
+    /// The wanted class when resident, else the nearest resident fallback,
+    /// preferring sharper-than-wanted over blurrier-than-wanted
+    fn best_resident(
+        classes: &BTreeMap<LoadClass, CacheEntry>,
+        class: LoadClass,
+    ) -> Option<LoadClass> {
+        classes
             .range(class..)
             .chain(classes.range(..class).rev())
             .find(|(_, entry)| entry.gpu.is_some())
-            .map(|(class, _)| *class)?;
-
-        classes.get_mut(&best).unwrap().gpu.as_mut()
+            .map(|(class, _)| *class)
     }
 }

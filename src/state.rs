@@ -307,16 +307,26 @@ impl State {
         )
     }
 
+    /// `advance` decides whether the cache may request/poll/upload during the
+    /// lookup. Rendering must pass false: uploads create renderables with
+    /// uninitialized vertex buffers, which would skip their draw for a frame
+    /// (a visible flicker when replacing an already-displayed fallback). The
+    /// resize paths pass true, as they lay out vertices right after upload.
     fn apply_op_to_image_states<'a>(
         &self,
         images: impl Iterator<Item = &'a LazyImage>,
         class: LoadClass,
+        advance: bool,
         mut func: impl FnMut(&mut RenderableImage, usize),
     ) {
         let mut cache = self.image_cache.borrow_mut();
         for img in images {
-            if let Some(renderable) = cache.get_renderable(img.path(), class, |g| self.upload(g))
-            {
+            let renderable = match advance {
+                true => cache.get_renderable(img.path(), class, |g| self.upload(g)),
+                false => cache.get_resident(img.path(), class),
+            };
+
+            if let Some(renderable) = renderable {
                 func(renderable, img.get_pos());
             }
         }
@@ -332,7 +342,7 @@ impl State {
         col_no: f32,
         cursor_idx: f32,
     ) {
-        self.apply_op_to_image_states(images, class, |renderable, pos| {
+        self.apply_op_to_image_states(images, class, true, |renderable, pos| {
             let iw = renderable.width() as f32;
             let ih = renderable.height() as f32;
             renderable.resize(Vertices::new().gallery(ww, wh, iw, ih, row_no, col_no, pos as f32));
@@ -409,7 +419,7 @@ impl State {
 
         renderpass.set_pipeline(&self.render_pipeline);
 
-        self.apply_op_to_image_states(images, class, |renderable, _| {
+        self.apply_op_to_image_states(images, class, false, |renderable, _| {
             renderable.render(&mut renderpass);
         });
 
