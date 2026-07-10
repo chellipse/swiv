@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path, path::PathBuf, rc::Rc};
+use std::{collections::HashMap, path::Path, path::PathBuf};
 
 use anyhow::Result;
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -25,7 +25,8 @@ enum CpuState {
     #[default]
     NotRequested,
     Requested(Receiver<Result<GenericImage>>),
-    Loaded(Rc<GenericImage>),
+    /// Pixels live on the GPU only; the decoded bytes were dropped at upload
+    Uploaded,
     Failed,
 }
 
@@ -65,7 +66,12 @@ impl ImageCache {
             CpuState::Requested(receiver) => {
                 if let Ok(resp) = receiver.try_recv() {
                     match resp {
-                        Ok(img) => entry.cpu = CpuState::Loaded(Rc::new(img)),
+                        Ok(img) => {
+                            entry.gpu = Some(upload(&img));
+                            entry.cpu = CpuState::Uploaded;
+                            // img dropped here: the CPU copy only lives until
+                            // the pixels are on the GPU
+                        }
                         Err(e) => {
                             tracing::debug!("Load failed: {e:?} from {path:?}");
                             entry.cpu = CpuState::Failed;
@@ -74,10 +80,6 @@ impl ImageCache {
                 }
             }
             _ => {}
-        }
-
-        if let (CpuState::Loaded(img), gpu @ None) = (&entry.cpu, &mut entry.gpu) {
-            *gpu = Some(upload(img));
         }
 
         entry.gpu.as_mut()
