@@ -178,7 +178,7 @@ impl App {
 
         let images: Vec<_> = paths
             .into_iter()
-            .map(|path| LazyImage::new(path, image_loader_service.clone_sender()))
+            .map(LazyImage::new)
             .collect();
 
         let mut exiting = false;
@@ -589,7 +589,10 @@ impl ApplicationHandler for App {
                 .unwrap(),
         );
 
-        let state = pollster::block_on(State::new(window.clone()));
+        let state = pollster::block_on(State::new(
+            window.clone(),
+            self.image_loader_service.clone_sender(),
+        ));
         self.state = Some(state);
 
         window.request_redraw();

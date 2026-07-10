@@ -1,9 +1,13 @@
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, sync::Arc};
+use std::{cell::RefCell, sync::Arc};
 
+use crossbeam_channel::Sender;
 use wgpu::{wgt::PollType, Features, TextureFormat, TextureUsages};
 use winit::window::{Fullscreen, Window};
 
-use crate::lazy::{LazyImage, LazyVertexBuffer, RenderableImage, Vertices};
+use crate::{
+    cache::ImageCache,
+    lazy::{GenericImage, ImageRequest, LazyImage, LazyVertexBuffer, RenderableImage, Vertices},
+};
 
 #[derive(Debug)]
 pub struct State {
@@ -16,7 +20,7 @@ pub struct State {
     render_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    image_state_map: RefCell<HashMap<PathBuf, RenderableImage>>,
+    image_cache: RefCell<ImageCache>,
     // gallery mode cursor rendering
     invert_pipeline: wgpu::RenderPipeline,
     cursor_buffer: RefCell<LazyVertexBuffer>,
@@ -24,7 +28,7 @@ pub struct State {
 }
 
 impl State {
-    pub async fn new(window: Arc<Window>) -> State {
+    pub async fn new(window: Arc<Window>, req_sender: Sender<ImageRequest>) -> State {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -249,7 +253,7 @@ impl State {
             cursor_bind_group,
             bind_group_layout,
             sampler,
-            image_state_map: RefCell::new(HashMap::new()),
+            image_cache: RefCell::new(ImageCache::new(req_sender)),
         };
 
         state.configure_surface();
@@ -293,38 +297,25 @@ impl State {
         self.window.set_title(title);
     }
 
+    fn upload(&self, img: &GenericImage) -> RenderableImage {
+        RenderableImage::new(
+            img,
+            &self.device,
+            &self.queue,
+            &self.bind_group_layout,
+            &self.sampler,
+        )
+    }
+
     fn apply_op_to_image_states<'a>(
         &self,
         images: impl Iterator<Item = &'a LazyImage>,
         mut func: impl FnMut(&mut RenderableImage, usize),
     ) {
-        for (pos, path, img) in images
-            .map(|img| (img.get_pos(), img.path(), img))
-            .filter_map(|(pos, path, img)| img.get().and_then(|r| Some((pos, path, r))))
-            .filter_map(|(pos, path, img)| img.ok().and_then(|r| Some((pos, path, r))))
-        {
-            let mut map = self.image_state_map.borrow_mut();
-
-            // NOTE: we could use the entry api here however that would require
-            // us to clone path even when the entry already exists, which is hot
-            // path. so we don't
-            match map.get_mut(path) {
-                Some(renderable) => {
-                    func(renderable, pos);
-                }
-                None => {
-                    let mut renderable = RenderableImage::new(
-                        &img,
-                        &self.device,
-                        &self.queue,
-                        &self.bind_group_layout,
-                        &self.sampler,
-                    );
-
-                    func(&mut renderable, pos);
-
-                    map.insert(path.to_path_buf(), renderable);
-                }
+        let mut cache = self.image_cache.borrow_mut();
+        for img in images {
+            if let Some(renderable) = cache.get_renderable(img.path(), |g| self.upload(g)) {
+                func(renderable, img.get_pos());
             }
         }
     }
@@ -359,19 +350,8 @@ impl State {
         offset_x: f32,
         offset_y: f32,
     ) {
-        if let Some(Ok(img)) = image.get() {
-            let mut map = self.image_state_map.borrow_mut();
-
-            let renderable = map.entry(image.path().clone()).or_insert_with(|| {
-                RenderableImage::new(
-                    &img,
-                    &self.device,
-                    &self.queue,
-                    &self.bind_group_layout,
-                    &self.sampler,
-                )
-            });
-
+        let mut cache = self.image_cache.borrow_mut();
+        if let Some(renderable) = cache.get_renderable(image.path(), |g| self.upload(g)) {
             let iw = renderable.width() as f32;
             let ih = renderable.height() as f32;
             renderable.resize(Vertices::new().single_image(

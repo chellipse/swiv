@@ -1,11 +1,9 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     fs::File,
     io::BufReader,
-    marker::PhantomData,
     ops::{Div, Rem},
     path::{Path, PathBuf},
-    rc::Rc,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -13,7 +11,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use image::{DynamicImage, EncodableLayout, ImageDecoder, ImageReader};
 use wgpu::{
@@ -21,29 +19,19 @@ use wgpu::{
     TextureFormat, TextureUsages,
 };
 
+/// A path in the image collection plus its current gallery slot.
+/// Load state lives in [`crate::cache::ImageCache`], keyed by the path.
 #[derive(Debug)]
 pub struct LazyImage {
-    state: RefCell<LazyImageState>,
     grid_pos: Cell<usize>,
     path: PathBuf,
-    _not_send: PhantomData<*const ()>, // Makes the type !Send
-}
-
-#[derive(Debug)]
-enum LazyImageState {
-    Uninitialized(Sender<ImageRequest>),
-    Requested(Receiver<Result<GenericImage>>),
-    Initialized(Rc<GenericImage>),
-    Error(anyhow::Error),
 }
 
 impl LazyImage {
-    pub fn new(path: PathBuf, req_sender: Sender<ImageRequest>) -> Self {
+    pub fn new(path: PathBuf) -> Self {
         Self {
             path,
             grid_pos: Cell::new(0),
-            state: RefCell::new(LazyImageState::Uninitialized(req_sender)),
-            _not_send: PhantomData,
         }
     }
 
@@ -57,43 +45,6 @@ impl LazyImage {
 
     pub fn path(&self) -> &PathBuf {
         &self.path
-    }
-
-    pub fn get(&self) -> Option<Result<Rc<GenericImage>>> {
-        // Transition state if needed
-        {
-            let mut state = self.state.borrow_mut();
-            match &*state {
-                LazyImageState::Uninitialized(sender) => {
-                    let (response_channel, receiver) = unbounded();
-                    sender
-                        .send(ImageRequest::new(response_channel, self.path.clone()))
-                        .unwrap();
-                    *state = LazyImageState::Requested(receiver);
-                }
-                LazyImageState::Requested(receiver) => {
-                    if let Ok(resp) = receiver.try_recv() {
-                        match resp {
-                            Ok(resp) => {
-                                *state = LazyImageState::Initialized(Rc::new(resp));
-                            }
-                            Err(e) => {
-                                *state = LazyImageState::Error(e);
-                            }
-                        };
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Return result
-        let state = self.state.borrow();
-        match &*state {
-            LazyImageState::Initialized(result) => Some(Ok(Rc::clone(result))),
-            LazyImageState::Error(e) => Some(Err(anyhow!("{e:?} from {:?}", &self.path))),
-            _ => None,
-        }
     }
 }
 
