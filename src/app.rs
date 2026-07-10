@@ -16,6 +16,7 @@ use winit::{
 };
 
 use crate::{
+    cache::{bucket_for, LoadClass},
     keymap::{KeySpec, Keymap, MappableApp},
     lazy::{ImageLoaderService, LazyImage},
     state::State,
@@ -327,6 +328,7 @@ impl App {
                 let images = self.visible_grid_images().iter();
                 self.state.as_ref().unwrap().resize(
                     images,
+                    self.gallery_class(),
                     size.width as f32,
                     size.height as f32,
                     self.row_no as f32,
@@ -425,6 +427,7 @@ impl App {
                 let size = self.window_size.unwrap();
                 self.state.as_ref().unwrap().resize(
                     images,
+                    self.gallery_class(),
                     size.width as f32,
                     size.height as f32,
                     self.row_no as f32,
@@ -543,6 +546,14 @@ impl App {
         self.cursor_idx - (self.row_offset * self.col_no as usize)
     }
 
+    /// The thumbnail class gallery cells currently want, derived from the
+    /// cell side length in physical pixels (cells are squares of side
+    /// `window_height / row_no`, see [`Self::col_no_recalc`])
+    fn gallery_class(&self) -> LoadClass {
+        let size = self.window_size.unwrap();
+        LoadClass::Thumb(bucket_for(size.height / self.row_no))
+    }
+
     fn get_drag_offset_ndc(&self) -> Option<Point2> {
         match self {
             Self {
@@ -617,14 +628,18 @@ impl ApplicationHandler for App {
                 match self.mode {
                     Mode::Gallery => {
                         let images = self.visible_grid_images().iter();
-                        self.state.as_ref().unwrap().render(images, true);
-                    }
-                    Mode::SingleImage => {
-                        let image = &self.images[self.cursor_idx];
                         self.state
                             .as_ref()
                             .unwrap()
-                            .render(std::iter::once(image), false);
+                            .render(images, self.gallery_class(), true);
+                    }
+                    Mode::SingleImage => {
+                        let image = &self.images[self.cursor_idx];
+                        self.state.as_ref().unwrap().render(
+                            std::iter::once(image),
+                            LoadClass::Full,
+                            false,
+                        );
                     }
                 }
 

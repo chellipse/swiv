@@ -19,6 +19,8 @@ use wgpu::{
     TextureFormat, TextureUsages,
 };
 
+use crate::cache::LoadClass;
+
 /// A path in the image collection plus its current gallery slot.
 /// Load state lives in [`crate::cache::ImageCache`], keyed by the path.
 #[derive(Debug)]
@@ -51,19 +53,25 @@ impl LazyImage {
 pub struct ImageRequest {
     pub response_channel: Sender<Result<GenericImage>>,
     pub path: PathBuf,
+    pub class: LoadClass,
 }
 
 impl ImageRequest {
-    pub fn new(response_channel: Sender<Result<GenericImage>>, path: PathBuf) -> Self {
+    pub fn new(
+        response_channel: Sender<Result<GenericImage>>,
+        path: PathBuf,
+        class: LoadClass,
+    ) -> Self {
         Self {
             response_channel,
             path,
+            class,
         }
     }
 
     /// Returns whether the result was an error
     pub fn eval(self) -> bool {
-        let result = GenericImage::new(&self.path);
+        let result = GenericImage::decode(&self.path, self.class);
         let is_err = result.is_err();
         self.response_channel.send(result).unwrap();
         is_err
@@ -143,8 +151,14 @@ pub struct GenericImage {
 }
 
 impl GenericImage {
-    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
-        tracing::trace!("Loading {:?}", path.as_ref());
+    /// Decode entry point. Format sniffing and dispatch to backends beyond
+    /// image-rs (e.g. camera raws via rawler) will slot in here.
+    pub fn decode(path: impl AsRef<Path>, class: LoadClass) -> Result<Self> {
+        Self::decode_image_rs(path, class)
+    }
+
+    fn decode_image_rs(path: impl AsRef<Path>, class: LoadClass) -> Result<Self> {
+        tracing::trace!("Loading {:?} as {class:?}", path.as_ref());
 
         let file = File::open(&path)?;
         let reader = BufReader::new(file);
@@ -155,16 +169,32 @@ impl GenericImage {
         let icc_profile = decoder.icc_profile()?;
         let mut img = DynamicImage::from_decoder(decoder)?;
 
-        const MAX_WIDTH: u32 = 3840;
-        const MAX_HEIGHT: u32 = 2160;
-        if img.width() > MAX_WIDTH || img.height() > MAX_HEIGHT {
-            tracing::trace!(
-                "Resizing {}x{} from {:?}",
-                img.width(),
-                img.height(),
-                path.as_ref(),
-            );
-            img = img.resize(MAX_WIDTH, MAX_HEIGHT, image::imageops::FilterType::Triangle);
+        match class {
+            LoadClass::Full => {
+                // TODO drop this cap once GPU residency is budgeted (it makes
+                // single image mode lossy above 4k)
+                const MAX_WIDTH: u32 = 3840;
+                const MAX_HEIGHT: u32 = 2160;
+                if img.width() > MAX_WIDTH || img.height() > MAX_HEIGHT {
+                    tracing::trace!(
+                        "Resizing {}x{} from {:?}",
+                        img.width(),
+                        img.height(),
+                        path.as_ref(),
+                    );
+                    img = img.resize(MAX_WIDTH, MAX_HEIGHT, image::imageops::FilterType::Triangle);
+                }
+            }
+            // aspect-fit into the bucket box, but never upscale
+            LoadClass::Thumb(bucket) if img.width() > bucket || img.height() > bucket => {
+                // fast integer pre-shrink to <=2x the target, then a single
+                // quality pass; far cheaper than lanczos over the full image
+                if img.width() > bucket * 2 || img.height() > bucket * 2 {
+                    img = img.thumbnail(bucket * 2, bucket * 2);
+                }
+                img = img.resize(bucket, bucket, image::imageops::FilterType::Lanczos3);
+            }
+            LoadClass::Thumb(_) => {}
         }
 
         let width = img.width();

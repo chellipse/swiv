@@ -1,16 +1,47 @@
-use std::{collections::HashMap, path::Path, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::lazy::{GenericImage, ImageRequest, RenderableImage};
 
-/// Unified per-path image state: the CPU-side load state machine and the
-/// GPU-side renderable live in one entry, so residency decisions can be
-/// made in one place.
+/// The resolution an image is decoded at.
+///
+/// The derived ordering (smaller buckets < larger buckets < Full) is what
+/// makes the fallback range scans in [`ImageCache::get_renderable`] work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum LoadClass {
+    /// Aspect-fit into a square bounding box of this size in physical px,
+    /// always one of [`LADDER`]
+    Thumb(u32),
+    /// Native resolution (still capped for now, see [`GenericImage::decode`])
+    Full,
+}
+
+/// The fixed set of thumbnail bucket sizes. Rounding the needed cell size
+/// *up* to a bucket guarantees a cell never displays more pixels than its
+/// thumbnail holds (at worst ~2x oversampled), while bounding how many
+/// variants of an image can ever exist no matter how many window size and
+/// row count combinations are passed through.
+pub const LADDER: [u32; 5] = [128, 256, 512, 1024, 2048];
+
+/// The smallest bucket that fully covers a gallery cell of side `cell_px`.
+pub fn bucket_for(cell_px: u32) -> u32 {
+    LADDER
+        .into_iter()
+        .find(|&b| b >= cell_px)
+        .unwrap_or(LADDER[LADDER.len() - 1])
+}
+
+/// Unified per-(path, class) image state: the CPU-side load state machine
+/// and the GPU-side renderable live in one entry, so residency decisions can
+/// be made in one place.
 #[derive(Debug)]
 pub struct ImageCache {
-    entries: HashMap<PathBuf, CacheEntry>,
+    entries: HashMap<PathBuf, BTreeMap<LoadClass, CacheEntry>>,
     req_sender: Sender<ImageRequest>,
 }
 
@@ -38,50 +69,73 @@ impl ImageCache {
         }
     }
 
-    /// Advances the load state for `path`: requests a load on first sight,
-    /// polls an in-flight request, and uploads via `upload` once bytes are
-    /// available. Returns the renderable while one exists.
+    /// Advances the load state for `path` and returns the best renderable
+    /// for `class`: requests a load on first sight, polls in-flight requests,
+    /// and uploads via `upload` once bytes are available.
+    ///
+    /// While the wanted class isn't resident, the nearest resident class is
+    /// returned instead, so cells show a re-scaled stand-in rather than
+    /// nothing during bucket transitions.
     pub fn get_renderable(
         &mut self,
         path: &Path,
-        upload: impl FnOnce(&GenericImage) -> RenderableImage,
+        class: LoadClass,
+        mut upload: impl FnMut(&GenericImage) -> RenderableImage,
     ) -> Option<&mut RenderableImage> {
         // NOTE: the entry api would require cloning path even when the entry
         // already exists, which is hot path. so we eat a second lookup on the
         // cold path instead
         if !self.entries.contains_key(path) {
-            self.entries
-                .insert(path.to_path_buf(), CacheEntry::default());
+            self.entries.insert(path.to_path_buf(), BTreeMap::new());
         }
-        let entry = self.entries.get_mut(path).unwrap();
+        let classes = self.entries.get_mut(path).unwrap();
 
-        match &entry.cpu {
-            CpuState::NotRequested => {
-                let (response_sender, response_receiver) = unbounded();
-                self.req_sender
-                    .send(ImageRequest::new(response_sender, path.to_path_buf()))
-                    .unwrap();
-                entry.cpu = CpuState::Requested(response_receiver);
-            }
-            CpuState::Requested(receiver) => {
-                if let Ok(resp) = receiver.try_recv() {
-                    match resp {
-                        Ok(img) => {
-                            entry.gpu = Some(upload(&img));
-                            entry.cpu = CpuState::Uploaded;
-                            // img dropped here: the CPU copy only lives until
-                            // the pixels are on the GPU
-                        }
-                        Err(e) => {
-                            tracing::debug!("Load failed: {e:?} from {path:?}");
-                            entry.cpu = CpuState::Failed;
-                        }
-                    }
+        // request the wanted class on first sight
+        let entry = classes.entry(class).or_default();
+        if matches!(entry.cpu, CpuState::NotRequested) {
+            let (response_sender, response_receiver) = unbounded();
+            self.req_sender
+                .send(ImageRequest::new(
+                    response_sender,
+                    path.to_path_buf(),
+                    class,
+                ))
+                .unwrap();
+            entry.cpu = CpuState::Requested(response_receiver);
+        }
+
+        // poll every in-flight request for this path, not just the wanted
+        // class: a decode completing for a stale bucket would otherwise sit
+        // in its channel holding the decoded bytes indefinitely
+        for entry in classes.values_mut() {
+            let CpuState::Requested(receiver) = &entry.cpu else {
+                continue;
+            };
+            let Ok(resp) = receiver.try_recv() else {
+                continue;
+            };
+            match resp {
+                Ok(img) => {
+                    entry.gpu = Some(upload(&img));
+                    entry.cpu = CpuState::Uploaded;
+                    // img dropped here: the CPU copy only lives until the
+                    // pixels are on the GPU
+                }
+                Err(e) => {
+                    tracing::debug!("Load failed: {e:?} from {path:?}");
+                    entry.cpu = CpuState::Failed;
                 }
             }
-            _ => {}
         }
 
-        entry.gpu.as_mut()
+        // the wanted class when resident, else the nearest resident
+        // fallback, preferring sharper-than-wanted over blurrier-than-wanted
+        let best = classes
+            .range(class..)
+            .chain(classes.range(..class).rev())
+            .find(|(_, entry)| entry.gpu.is_some())
+            .map(|(class, _)| *class)?;
+
+        classes.get_mut(&best).unwrap().gpu.as_mut()
     }
 }

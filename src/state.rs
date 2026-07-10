@@ -5,7 +5,7 @@ use wgpu::{wgt::PollType, Features, TextureFormat, TextureUsages};
 use winit::window::{Fullscreen, Window};
 
 use crate::{
-    cache::ImageCache,
+    cache::{ImageCache, LoadClass},
     lazy::{GenericImage, ImageRequest, LazyImage, LazyVertexBuffer, RenderableImage, Vertices},
 };
 
@@ -310,11 +310,13 @@ impl State {
     fn apply_op_to_image_states<'a>(
         &self,
         images: impl Iterator<Item = &'a LazyImage>,
+        class: LoadClass,
         mut func: impl FnMut(&mut RenderableImage, usize),
     ) {
         let mut cache = self.image_cache.borrow_mut();
         for img in images {
-            if let Some(renderable) = cache.get_renderable(img.path(), |g| self.upload(g)) {
+            if let Some(renderable) = cache.get_renderable(img.path(), class, |g| self.upload(g))
+            {
                 func(renderable, img.get_pos());
             }
         }
@@ -323,13 +325,14 @@ impl State {
     pub fn resize<'a>(
         &self,
         images: impl Iterator<Item = &'a LazyImage>,
+        class: LoadClass,
         ww: f32,
         wh: f32,
         row_no: f32,
         col_no: f32,
         cursor_idx: f32,
     ) {
-        self.apply_op_to_image_states(images, |renderable, pos| {
+        self.apply_op_to_image_states(images, class, |renderable, pos| {
             let iw = renderable.width() as f32;
             let ih = renderable.height() as f32;
             renderable.resize(Vertices::new().gallery(ww, wh, iw, ih, row_no, col_no, pos as f32));
@@ -351,7 +354,9 @@ impl State {
         offset_y: f32,
     ) {
         let mut cache = self.image_cache.borrow_mut();
-        if let Some(renderable) = cache.get_renderable(image.path(), |g| self.upload(g)) {
+        if let Some(renderable) =
+            cache.get_renderable(image.path(), LoadClass::Full, |g| self.upload(g))
+        {
             let iw = renderable.width() as f32;
             let ih = renderable.height() as f32;
             renderable.resize(Vertices::new().single_image(
@@ -368,7 +373,12 @@ impl State {
         }
     }
 
-    pub fn render<'a>(&self, images: impl Iterator<Item = &'a LazyImage>, show_cursor: bool) {
+    pub fn render<'a>(
+        &self,
+        images: impl Iterator<Item = &'a LazyImage>,
+        class: LoadClass,
+        show_cursor: bool,
+    ) {
         let surface_texture = self
             .surface
             .get_current_texture()
@@ -399,7 +409,7 @@ impl State {
 
         renderpass.set_pipeline(&self.render_pipeline);
 
-        self.apply_op_to_image_states(images, |renderable, _| {
+        self.apply_op_to_image_states(images, class, |renderable, _| {
             renderable.render(&mut renderpass);
         });
 
