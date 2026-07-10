@@ -138,7 +138,7 @@ impl ImageLoaderService {
             (0, Err(_)) => Self::MIN_PAR,
             (a, _) => a,
         };
-        let parallelism = parallelism.min(Self::MIN_PAR).max(Self::MAX_PAR);
+        let parallelism = parallelism.clamp(Self::MIN_PAR, Self::MAX_PAR);
         tracing::info!("ImageLoaderService parallelism: {parallelism}");
 
         let (completion_sender, completion_receiver) = unbounded();
