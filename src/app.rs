@@ -191,7 +191,11 @@ impl App {
             exiting = true;
         }
 
-        let sys = sysinfo::System::new_all();
+        // NOTE: never System::new_all() here — enumerating every process on
+        // the system costs ~300ms on the critical path to the first window;
+        // memory info is all we consume
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
 
         let mode = match cursor_idx {
             Some(_) => Mode::SingleImage,
