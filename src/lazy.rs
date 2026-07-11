@@ -151,6 +151,15 @@ pub struct GenericImage {
 }
 
 impl GenericImage {
+    /// Header-only read of the native dimensions; no pixel decode
+    pub fn probe_dimensions(path: impl AsRef<Path>) -> Result<(u32, u32)> {
+        let file = File::open(&path)?;
+        let reader = BufReader::new(file);
+        Ok(ImageReader::new(reader)
+            .with_guessed_format()?
+            .into_dimensions()?)
+    }
+
     /// Decode entry point. Format sniffing and dispatch to backends beyond
     /// image-rs (e.g. camera raws via rawler) will slot in here.
     pub fn decode(path: impl AsRef<Path>, class: LoadClass) -> Result<Self> {

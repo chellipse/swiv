@@ -21,6 +21,20 @@ pub enum LoadClass {
     Full,
 }
 
+impl LoadClass {
+    /// Collapses classes that cannot differ for an image with the given
+    /// native dimensions: a thumb bucket that fully contains the image
+    /// decodes to exactly the pixels Full would (the decoder never
+    /// upscales), so they should share one entry instead of duplicating
+    /// decodes and textures
+    fn canonicalize(self, native: Option<(u32, u32)>) -> Self {
+        match (self, native) {
+            (Self::Thumb(bucket), Some((w, h))) if w <= bucket && h <= bucket => Self::Full,
+            _ => self,
+        }
+    }
+}
+
 /// The fixed set of thumbnail bucket sizes. Rounding the needed cell size
 /// *up* to a bucket guarantees a cell never displays more pixels than its
 /// thumbnail holds (at worst ~2x oversampled), while bounding how many
@@ -41,8 +55,16 @@ pub fn bucket_for(cell_px: u32) -> u32 {
 /// be made in one place.
 #[derive(Debug)]
 pub struct ImageCache {
-    entries: HashMap<PathBuf, BTreeMap<LoadClass, CacheEntry>>,
+    entries: HashMap<PathBuf, PathEntry>,
     req_sender: Sender<ImageRequest>,
+}
+
+#[derive(Debug, Default)]
+struct PathEntry {
+    /// Native dimensions from a header-only probe at first sight;
+    /// None when probing failed
+    native: Option<(u32, u32)>,
+    classes: BTreeMap<LoadClass, CacheEntry>,
 }
 
 #[derive(Debug, Default)]
@@ -78,9 +100,10 @@ impl ImageCache {
     /// vertex buffer (which would skip its draw and flicker for a frame) can
     /// never reach a render pass.
     pub fn get_resident(&mut self, path: &Path, class: LoadClass) -> Option<&mut RenderableImage> {
-        let classes = self.entries.get_mut(path)?;
-        let best = Self::best_resident(classes, class)?;
-        classes.get_mut(&best).unwrap().gpu.as_mut()
+        let entry = self.entries.get_mut(path)?;
+        let class = class.canonicalize(entry.native);
+        let best = Self::best_resident(&entry.classes, class)?;
+        entry.classes.get_mut(&best).unwrap().gpu.as_mut()
     }
 
     /// Advances the load state for `path` and returns the best renderable
@@ -103,12 +126,24 @@ impl ImageCache {
         // already exists, which is hot path. so we eat a second lookup on the
         // cold path instead
         if !self.entries.contains_key(path) {
-            self.entries.insert(path.to_path_buf(), BTreeMap::new());
+            // header-only read, cheap enough for the ui thread; a failed
+            // probe is not fatal (the decode is authoritative for errors)
+            let native = GenericImage::probe_dimensions(path)
+                .inspect_err(|e| tracing::debug!("Probe failed: {e:?} from {path:?}"))
+                .ok();
+            self.entries.insert(
+                path.to_path_buf(),
+                PathEntry {
+                    native,
+                    ..Default::default()
+                },
+            );
         }
-        let classes = self.entries.get_mut(path).unwrap();
+        let path_entry = self.entries.get_mut(path).unwrap();
+        let class = class.canonicalize(path_entry.native);
 
         // request the wanted class on first sight
-        let entry = classes.entry(class).or_default();
+        let entry = path_entry.classes.entry(class).or_default();
         if matches!(entry.cpu, CpuState::NotRequested) {
             let (response_sender, response_receiver) = unbounded();
             self.req_sender
@@ -124,7 +159,7 @@ impl ImageCache {
         // poll every in-flight request for this path, not just the wanted
         // class: a decode completing for a stale bucket would otherwise sit
         // in its channel holding the decoded bytes indefinitely
-        for entry in classes.values_mut() {
+        for entry in path_entry.classes.values_mut() {
             let CpuState::Requested(receiver) = &entry.cpu else {
                 continue;
             };
@@ -145,8 +180,8 @@ impl ImageCache {
             }
         }
 
-        let best = Self::best_resident(classes, class)?;
-        classes.get_mut(&best).unwrap().gpu.as_mut()
+        let best = Self::best_resident(&path_entry.classes, class)?;
+        path_entry.classes.get_mut(&best).unwrap().gpu.as_mut()
     }
 
     /// The wanted class when resident, else the nearest resident fallback,
