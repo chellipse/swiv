@@ -19,7 +19,7 @@ use wgpu::{
     TextureFormat, TextureUsages,
 };
 
-use crate::cache::LoadClass;
+use crate::{cache::LoadClass, disk_cache::ThumbDiskCache};
 
 /// A path in the image collection plus its current gallery slot.
 /// Load state lives in [`crate::cache::ImageCache`], keyed by the path.
@@ -70,8 +70,8 @@ impl ImageRequest {
     }
 
     /// Returns whether the result was an error
-    pub fn eval(self) -> bool {
-        let result = GenericImage::decode(&self.path, self.class);
+    pub fn eval(self, disk_cache: Option<&ThumbDiskCache>) -> bool {
+        let result = GenericImage::decode(&self.path, self.class, disk_cache);
         let is_err = result.is_err();
         self.response_channel.send(result).unwrap();
         is_err
@@ -100,19 +100,31 @@ impl ImageLoaderService {
         let parallelism = parallelism.clamp(Self::MIN_PAR, Self::MAX_PAR);
         tracing::info!("ImageLoaderService parallelism: {parallelism}");
 
+        let disk_cache = match ThumbDiskCache::new() {
+            Ok(cache) => {
+                cache.spawn_janitor();
+                Some(cache)
+            }
+            Err(e) => {
+                tracing::warn!("Thumbnail disk cache disabled: {e:?}");
+                None
+            }
+        };
+
         let (completion_sender, completion_receiver) = unbounded();
         let (sender, receiver) = unbounded::<ImageRequest>();
         let mut handles = Vec::new();
         for id in 0..parallelism {
             let receiver = receiver.clone();
             let completion_sender = completion_sender.clone();
+            let disk_cache = disk_cache.clone();
 
             let handle = thread::spawn(move || loop {
                 match receiver.recv() {
                     Ok(req) => {
                         let path = req.path.clone();
                         tracing::trace!("Request on {id}:{:?}", path);
-                        let was_err = req.eval();
+                        let was_err = req.eval(disk_cache.as_ref());
                         let _ = completion_sender.send((path, was_err));
                     }
                     Err(_) => break,
@@ -160,10 +172,63 @@ impl GenericImage {
             .into_dimensions()?)
     }
 
-    /// Decode entry point. Format sniffing and dispatch to backends beyond
-    /// image-rs (e.g. camera raws via rawler) will slot in here.
-    pub fn decode(path: impl AsRef<Path>, class: LoadClass) -> Result<Self> {
-        Self::decode_image_rs(path, class)
+    /// Decode entry point, wrapping the backends with the thumbnail disk
+    /// cache. Format sniffing and dispatch to backends beyond image-rs
+    /// (e.g. camera raws via rawler) will slot in here.
+    pub fn decode(
+        path: impl AsRef<Path>,
+        class: LoadClass,
+        disk_cache: Option<&ThumbDiskCache>,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        let (LoadClass::Thumb(bucket), Some(cache)) = (class, disk_cache) else {
+            return Self::decode_image_rs(path, class);
+        };
+
+        if let Some(img) = cache.load(path, bucket) {
+            tracing::trace!("Thumb cache hit: {path:?} @{bucket}");
+            return Ok(Self::from_dynamic_srgb(img));
+        }
+
+        // build from a larger cached thumb when possible: skips re-decoding
+        // the original, and the quality cost of a second lanczos pass at
+        // these sizes is negligible
+        if let Some(larger) = cache.load_larger(path, bucket) {
+            tracing::trace!("Thumb cache promotion: {path:?} @{bucket}");
+            let this = Self::from_dynamic_srgb(Self::downscale_to_bucket(larger, bucket));
+            cache.store(path, bucket, this.width, this.height, &this.bytes);
+            return Ok(this);
+        }
+
+        let this = Self::decode_image_rs(path, class)?;
+        cache.store(path, bucket, this.width, this.height, &this.bytes);
+        Ok(this)
+    }
+
+    /// For pixels that are already sRGB (i.e. out of the disk cache); no
+    /// ICC transform is applied
+    fn from_dynamic_srgb(img: DynamicImage) -> Self {
+        Self {
+            width: img.width(),
+            height: img.height(),
+            bytes: img.to_rgba8().as_bytes().to_vec(),
+            format: TextureFormat::Rgba8UnormSrgb,
+            pixel_width: 4,
+        }
+    }
+
+    /// Aspect-fit into the bucket box, but never upscale
+    fn downscale_to_bucket(mut img: DynamicImage, bucket: u32) -> DynamicImage {
+        if img.width() <= bucket && img.height() <= bucket {
+            return img;
+        }
+
+        // fast integer pre-shrink to <=2x the target, then a single quality
+        // pass; far cheaper than lanczos over the full image
+        if img.width() > bucket * 2 || img.height() > bucket * 2 {
+            img = img.thumbnail(bucket * 2, bucket * 2);
+        }
+        img.resize(bucket, bucket, image::imageops::FilterType::Lanczos3)
     }
 
     fn decode_image_rs(path: impl AsRef<Path>, class: LoadClass) -> Result<Self> {
@@ -194,16 +259,9 @@ impl GenericImage {
                     img = img.resize(MAX_WIDTH, MAX_HEIGHT, image::imageops::FilterType::Triangle);
                 }
             }
-            // aspect-fit into the bucket box, but never upscale
-            LoadClass::Thumb(bucket) if img.width() > bucket || img.height() > bucket => {
-                // fast integer pre-shrink to <=2x the target, then a single
-                // quality pass; far cheaper than lanczos over the full image
-                if img.width() > bucket * 2 || img.height() > bucket * 2 {
-                    img = img.thumbnail(bucket * 2, bucket * 2);
-                }
-                img = img.resize(bucket, bucket, image::imageops::FilterType::Lanczos3);
+            LoadClass::Thumb(bucket) => {
+                img = Self::downscale_to_bucket(img, bucket);
             }
-            LoadClass::Thumb(_) => {}
         }
 
         let width = img.width();
