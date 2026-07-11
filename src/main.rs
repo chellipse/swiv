@@ -74,10 +74,12 @@ impl Cli {
             Box::new(Self::open_dir(&target, recursion, self.no_ignore)?.map(|entry| entry.path()));
 
         if self.ignore_ext {
-            // currently we only support formats image-rs supports
             const EXTENSIONS: &[&str] = &[
+                // formats image-rs supports
                 "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif", "tga", "dds",
                 "farbfeld", "ff", "pnm", "pbm", "pgm", "pam", "ppm", "hdr", "exr", "qoi", "avif",
+                // via the psd backend
+                "psd", "psb",
             ];
             iter = Box::new(iter.filter(|path| {
                 path.extension()

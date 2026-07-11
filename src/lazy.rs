@@ -11,9 +11,9 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use image::{DynamicImage, EncodableLayout, ImageDecoder, ImageReader};
+use image::{DynamicImage, EncodableLayout, ImageDecoder, ImageReader, RgbaImage};
 use wgpu::{
     util::DeviceExt, BindGroup, BindGroupLayout, Buffer, Device, Queue, RenderPass, Sampler,
     TextureFormat, TextureUsages,
@@ -176,9 +176,20 @@ pub struct GenericImage {
 }
 
 impl GenericImage {
+    fn is_psd(path: &Path) -> bool {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("psd") || e.eq_ignore_ascii_case("psb"))
+    }
+
     /// Header-only read of the native dimensions; no pixel decode
     pub fn probe_dimensions(path: impl AsRef<Path>) -> Result<(u32, u32)> {
-        let file = File::open(&path)?;
+        let path = path.as_ref();
+        if Self::is_psd(path) {
+            return crate::psd::probe_dimensions(path);
+        }
+
+        let file = File::open(path)?;
         let reader = BufReader::new(file);
         Ok(ImageReader::new(reader)
             .with_guessed_format()?
@@ -186,12 +197,11 @@ impl GenericImage {
     }
 
     /// Decode entry point, wrapping the backends with the thumbnail disk
-    /// cache. Format sniffing and dispatch to backends beyond image-rs
-    /// (e.g. camera raws via rawler) will slot in here.
+    /// cache
     pub fn decode(path: impl AsRef<Path>, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
         let path = path.as_ref();
         let (LoadClass::Thumb(bucket), Some(cache)) = (class, ctx.disk_cache.as_ref()) else {
-            return Self::decode_image_rs(path, class, ctx.max_alloc);
+            return Self::decode_backend(path, class, ctx.max_alloc);
         };
 
         if let Some(img) = cache.load(path, bucket) {
@@ -209,9 +219,28 @@ impl GenericImage {
             return Ok(this);
         }
 
-        let this = Self::decode_image_rs(path, class, ctx.max_alloc)?;
+        let this = Self::decode_backend(path, class, ctx.max_alloc)?;
         cache.store(path, bucket, this.width, this.height, &this.bytes);
         Ok(this)
+    }
+
+    /// Format dispatch across decode backends (camera raws via rawler will
+    /// slot in here too)
+    fn decode_backend(path: &Path, class: LoadClass, max_alloc: Option<u64>) -> Result<Self> {
+        match Self::is_psd(path) {
+            true => Self::decode_psd(path, class, max_alloc),
+            false => Self::decode_image_rs(path, class, max_alloc),
+        }
+    }
+
+    fn decode_psd(path: &Path, class: LoadClass, max_alloc: Option<u64>) -> Result<Self> {
+        tracing::trace!("Loading {path:?} as {class:?} via psd backend");
+
+        let composite = crate::psd::decode(path, max_alloc)?;
+        let img = RgbaImage::from_raw(composite.width, composite.height, composite.rgba)
+            .ok_or_else(|| anyhow!("psd composite buffer size mismatch"))?;
+
+        Self::finish_decode(DynamicImage::ImageRgba8(img), composite.icc, class, path)
     }
 
     /// For pixels that are already sRGB (i.e. out of the disk cache); no
@@ -259,8 +288,19 @@ impl GenericImage {
         reader.limits(limits);
         let mut decoder = reader.into_decoder()?;
         let icc_profile = decoder.icc_profile()?;
-        let mut img = DynamicImage::from_decoder(decoder)?;
+        let img = DynamicImage::from_decoder(decoder)?;
 
+        Self::finish_decode(img, icc_profile, class, path.as_ref())
+    }
+
+    /// Shared tail of every decode backend: class-dependent sizing, RGBA8
+    /// conversion, and the ICC transform to sRGB
+    fn finish_decode(
+        mut img: DynamicImage,
+        icc_profile: Option<Vec<u8>>,
+        class: LoadClass,
+        path: &Path,
+    ) -> Result<Self> {
         match class {
             LoadClass::Full => {
                 // TODO drop this cap once GPU residency is budgeted (it makes
@@ -268,12 +308,7 @@ impl GenericImage {
                 const MAX_WIDTH: u32 = 3840;
                 const MAX_HEIGHT: u32 = 2160;
                 if img.width() > MAX_WIDTH || img.height() > MAX_HEIGHT {
-                    tracing::trace!(
-                        "Resizing {}x{} from {:?}",
-                        img.width(),
-                        img.height(),
-                        path.as_ref(),
-                    );
+                    tracing::trace!("Resizing {}x{} from {path:?}", img.width(), img.height());
                     img = img.resize(MAX_WIDTH, MAX_HEIGHT, image::imageops::FilterType::Triangle);
                 }
             }
@@ -299,11 +334,11 @@ impl GenericImage {
                 lcms2::Intent::Perceptual,
             )?;
 
-            tracing::trace!("Transforming {:?} via ICC profile", path.as_ref());
+            tracing::trace!("Transforming {path:?} via ICC profile");
             t.transform_in_place(&mut bytes);
         }
 
-        tracing::trace!("Finished: {:?}", path.as_ref());
+        tracing::trace!("Finished: {path:?}");
         Ok(Self {
             width,
             height,
