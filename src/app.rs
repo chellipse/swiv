@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     ops::*,
     path::PathBuf,
-    sync::{Arc, LazyLock},
+    sync::{atomic::AtomicU32, Arc, LazyLock},
 };
 
 use itertools::{Either, Itertools};
@@ -128,6 +128,9 @@ pub struct App {
     sys: sysinfo::System,
     /// resolved GPU texture budget in bytes, handed to [`State`] on creation
     gpu_budget: u64,
+    /// shared with the decode workers; [`State`] stores the device limit
+    /// into it on creation
+    max_texture_dim: Arc<AtomicU32>,
 
     /// Store the state from it so it can be accessed by methods triggered
     /// from [`Keymap::apply`] calls
@@ -175,7 +178,13 @@ impl App {
         max_decode_alloc: Option<u64>,
         gpu_budget_override: Option<u64>,
     ) -> Self {
-        let image_loader_service = ImageLoaderService::new(0, max_decode_alloc);
+        // safe default until the render state publishes the device's real
+        // limit; requests can't fire before then (they originate from the
+        // render state's cache)
+        let max_texture_dim = Arc::new(AtomicU32::new(8192));
+
+        let image_loader_service =
+            ImageLoaderService::new(0, max_decode_alloc, max_texture_dim.clone());
 
         tracing::info!("Path count: {}", paths.len());
         const NO_FIRST_DISPLAYED: usize = 10;
@@ -233,6 +242,7 @@ impl App {
             exit_msg: None,
             sys,
             gpu_budget,
+            max_texture_dim,
             scale: 1.0,
         }
     }
@@ -626,6 +636,7 @@ impl ApplicationHandler for App {
             window.clone(),
             self.image_loader_service.clone_sender(),
             self.gpu_budget,
+            self.max_texture_dim.clone(),
         ));
         self.state = Some(state);
 

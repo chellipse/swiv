@@ -1,4 +1,7 @@
-use std::{cell::RefCell, sync::Arc};
+use std::{
+    cell::RefCell,
+    sync::{atomic::AtomicU32, Arc},
+};
 
 use crossbeam_channel::Sender;
 use wgpu::{wgt::PollType, Features, TextureFormat, TextureUsages};
@@ -6,7 +9,10 @@ use winit::window::{Fullscreen, Window};
 
 use crate::{
     cache::{ImageCache, LoadClass},
-    lazy::{GenericImage, ImageRequest, LazyImage, LazyVertexBuffer, RenderableImage, Vertices},
+    lazy::{
+        GenericImage, ImageRequest, LazyImage, LazyVertexBuffer, MipGenerator, RenderableImage,
+        Vertices,
+    },
 };
 
 #[derive(Debug)]
@@ -21,6 +27,7 @@ pub struct State {
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     image_cache: RefCell<ImageCache>,
+    mip_generator: MipGenerator,
     // gallery mode cursor rendering
     invert_pipeline: wgpu::RenderPipeline,
     cursor_buffer: RefCell<LazyVertexBuffer>,
@@ -32,6 +39,7 @@ impl State {
         window: Arc<Window>,
         req_sender: Sender<ImageRequest>,
         gpu_budget: u64,
+        max_texture_dim: Arc<AtomicU32>,
     ) -> State {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = instance
@@ -42,10 +50,27 @@ impl State {
             .request_device(&wgpu::DeviceDescriptor {
                 required_features: Features::MAPPABLE_PRIMARY_BUFFERS
                     | Features::TEXTURE_FORMAT_16BIT_NORM,
+                // the wgpu defaults stop at 8192 regardless of hardware;
+                // native-resolution (Full) textures want the real limit
+                required_limits: wgpu::Limits {
+                    max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d,
+                    ..Default::default()
+                },
                 ..Default::default()
             })
             .await
             .unwrap();
+
+        // publish the real limit to the decode workers, which clamp Full
+        // decodes to it
+        max_texture_dim.store(
+            device.limits().max_texture_dimension_2d,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        tracing::info!(
+            "Device texture size limit: {}",
+            device.limits().max_texture_dimension_2d
+        );
 
         let size = window.inner_size();
 
@@ -244,6 +269,8 @@ impl State {
             label: Some("Cursor indicator bind group"),
         });
 
+        let mip_generator = MipGenerator::new(&device, TextureFormat::Rgba8UnormSrgb);
+
         let state = Self {
             window,
             device,
@@ -258,6 +285,7 @@ impl State {
             bind_group_layout,
             sampler,
             image_cache: RefCell::new(ImageCache::new(req_sender, gpu_budget)),
+            mip_generator,
         };
 
         state.configure_surface();
@@ -307,13 +335,18 @@ impl State {
         self.image_cache.borrow_mut().enforce_budget()
     }
 
-    fn upload(&self, img: &GenericImage) -> RenderableImage {
+    fn upload(&self, img: &GenericImage, class: LoadClass) -> RenderableImage {
+        // only Full gets a mip chain: thumbs are at most ~2x oversampled by
+        // construction, while Full can be minified by orders of magnitude
+        let mips = (class == LoadClass::Full).then_some(&self.mip_generator);
+
         RenderableImage::new(
             img,
             &self.device,
             &self.queue,
             &self.bind_group_layout,
             &self.sampler,
+            mips,
         )
     }
 
@@ -332,7 +365,7 @@ impl State {
         let mut cache = self.image_cache.borrow_mut();
         for img in images {
             let renderable = match advance {
-                true => cache.get_renderable(img.path(), class, |g| self.upload(g)),
+                true => cache.get_renderable(img.path(), class, |g, c| self.upload(g, c)),
                 false => cache.get_resident(img.path(), class),
             };
 
@@ -375,7 +408,7 @@ impl State {
     ) {
         let mut cache = self.image_cache.borrow_mut();
         if let Some(renderable) =
-            cache.get_renderable(image.path(), LoadClass::Full, |g| self.upload(g))
+            cache.get_renderable(image.path(), LoadClass::Full, |g, c| self.upload(g, c))
         {
             let iw = renderable.width() as f32;
             let ih = renderable.height() as f32;

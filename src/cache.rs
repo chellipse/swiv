@@ -149,7 +149,7 @@ impl ImageCache {
         &mut self,
         path: &Path,
         class: LoadClass,
-        mut upload: impl FnMut(&GenericImage) -> RenderableImage,
+        mut upload: impl FnMut(&GenericImage, LoadClass) -> RenderableImage,
     ) -> Option<&mut RenderableImage> {
         // NOTE: the entry api would require cloning path even when the entry
         // already exists, which is hot path. so we eat a second lookup on the
@@ -188,7 +188,7 @@ impl ImageCache {
         // poll every in-flight request for this path, not just the wanted
         // class: a decode completing for a stale bucket would otherwise sit
         // in its channel holding the decoded bytes indefinitely
-        for entry in path_entry.classes.values_mut() {
+        for (entry_class, entry) in path_entry.classes.iter_mut() {
             let CpuState::Requested(receiver) = &entry.cpu else {
                 continue;
             };
@@ -197,9 +197,8 @@ impl ImageCache {
             };
             match resp {
                 Ok(img) => {
-                    let renderable = upload(&img);
-                    entry.gpu_bytes =
-                        renderable.width() as u64 * renderable.height() as u64 * 4;
+                    let renderable = upload(&img, *entry_class);
+                    entry.gpu_bytes = renderable.gpu_bytes();
                     self.gpu_bytes_total += entry.gpu_bytes;
                     entry.last_used = self.frame;
                     entry.gpu = Some(renderable);

@@ -5,8 +5,8 @@ use std::{
     ops::{Div, Rem},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc, Mutex,
     },
     thread::{self, JoinHandle},
 };
@@ -56,6 +56,14 @@ pub struct DecodeContext {
     pub disk_cache: Option<ThumbDiskCache>,
     /// Decodes predicted to allocate more than this fail; None = unlimited
     pub max_alloc: Option<u64>,
+    /// The device's 2D texture size limit; Full decodes clamp to it. Holds
+    /// a conservative default until the render state stores the real value
+    /// once the GPU device exists (always before the first request fires,
+    /// since requests originate from the render state's cache)
+    pub max_texture_dim: Arc<AtomicU32>,
+    /// Serializes decodes with giant intermediate buffers, see
+    /// [`GenericImage::decode_backend`]
+    pub huge_decode_lock: Arc<Mutex<()>>,
 }
 
 pub struct ImageRequest {
@@ -99,7 +107,11 @@ impl ImageLoaderService {
     const MIN_PAR: usize = 1;
     const MAX_PAR: usize = 4;
 
-    pub fn new(parallelism: usize, max_alloc: Option<u64>) -> Self {
+    pub fn new(
+        parallelism: usize,
+        max_alloc: Option<u64>,
+        max_texture_dim: Arc<AtomicU32>,
+    ) -> Self {
         let parallelism = match (parallelism, thread::available_parallelism()) {
             (0, Ok(b)) => b.get(),
             (0, Err(_)) => Self::MIN_PAR,
@@ -122,6 +134,8 @@ impl ImageLoaderService {
         let ctx = DecodeContext {
             disk_cache,
             max_alloc,
+            max_texture_dim,
+            huge_decode_lock: Arc::new(Mutex::new(())),
         };
 
         let (completion_sender, completion_receiver) = unbounded();
@@ -201,7 +215,7 @@ impl GenericImage {
     pub fn decode(path: impl AsRef<Path>, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
         let path = path.as_ref();
         let (LoadClass::Thumb(bucket), Some(cache)) = (class, ctx.disk_cache.as_ref()) else {
-            return Self::decode_backend(path, class, ctx.max_alloc);
+            return Self::decode_backend(path, class, ctx);
         };
 
         if let Some(img) = cache.load(path, bucket) {
@@ -219,28 +233,42 @@ impl GenericImage {
             return Ok(this);
         }
 
-        let this = Self::decode_backend(path, class, ctx.max_alloc)?;
+        let this = Self::decode_backend(path, class, ctx)?;
         cache.store(path, bucket, this.width, this.height, &this.bytes);
         Ok(this)
     }
 
+    /// Decodes predicted to hold a buffer bigger than this run one at a time
+    const HUGE_DECODE_BYTES: u64 = 512 * 1024 * 1024;
+
     /// Format dispatch across decode backends (camera raws via rawler will
     /// slot in here too)
-    fn decode_backend(path: &Path, class: LoadClass, max_alloc: Option<u64>) -> Result<Self> {
+    fn decode_backend(path: &Path, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
+        // decoding materializes the native-size image no matter the class,
+        // so serialize the giant ones: concurrent workers would otherwise
+        // multiply a multi-GB buffer by the pool size
+        let _guard = match Self::probe_dimensions(path) {
+            Ok((w, h)) if w as u64 * h as u64 * 4 > Self::HUGE_DECODE_BYTES => {
+                tracing::debug!("Serializing huge decode: {path:?} ({w}x{h})");
+                Some(ctx.huge_decode_lock.lock().unwrap())
+            }
+            _ => None,
+        };
+
         match Self::is_psd(path) {
-            true => Self::decode_psd(path, class, max_alloc),
-            false => Self::decode_image_rs(path, class, max_alloc),
+            true => Self::decode_psd(path, class, ctx),
+            false => Self::decode_image_rs(path, class, ctx),
         }
     }
 
-    fn decode_psd(path: &Path, class: LoadClass, max_alloc: Option<u64>) -> Result<Self> {
+    fn decode_psd(path: &Path, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
         tracing::trace!("Loading {path:?} as {class:?} via psd backend");
 
-        let composite = crate::psd::decode(path, max_alloc)?;
+        let composite = crate::psd::decode(path, ctx.max_alloc)?;
         let img = RgbaImage::from_raw(composite.width, composite.height, composite.rgba)
             .ok_or_else(|| anyhow!("psd composite buffer size mismatch"))?;
 
-        Self::finish_decode(DynamicImage::ImageRgba8(img), composite.icc, class, path)
+        Self::finish_decode(DynamicImage::ImageRgba8(img), composite.icc, class, path, ctx)
     }
 
     /// For pixels that are already sRGB (i.e. out of the disk cache); no
@@ -269,11 +297,7 @@ impl GenericImage {
         img.resize(bucket, bucket, image::imageops::FilterType::Lanczos3)
     }
 
-    fn decode_image_rs(
-        path: impl AsRef<Path>,
-        class: LoadClass,
-        max_alloc: Option<u64>,
-    ) -> Result<Self> {
+    fn decode_image_rs(path: impl AsRef<Path>, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
         tracing::trace!("Loading {:?} as {class:?}", path.as_ref());
 
         let file = File::open(&path)?;
@@ -284,13 +308,13 @@ impl GenericImage {
         // legitimate giant images (gigapixel mosaics), with the user's
         // configured decode budget
         let mut limits = image::Limits::no_limits();
-        limits.max_alloc = max_alloc;
+        limits.max_alloc = ctx.max_alloc;
         reader.limits(limits);
         let mut decoder = reader.into_decoder()?;
         let icc_profile = decoder.icc_profile()?;
         let img = DynamicImage::from_decoder(decoder)?;
 
-        Self::finish_decode(img, icc_profile, class, path.as_ref())
+        Self::finish_decode(img, icc_profile, class, path.as_ref(), ctx)
     }
 
     /// Shared tail of every decode backend: class-dependent sizing, RGBA8
@@ -300,17 +324,21 @@ impl GenericImage {
         icc_profile: Option<Vec<u8>>,
         class: LoadClass,
         path: &Path,
+        ctx: &DecodeContext,
     ) -> Result<Self> {
         match class {
             LoadClass::Full => {
-                // TODO drop this cap once GPU residency is budgeted (it makes
-                // single image mode lossy above 4k)
-                const MAX_WIDTH: u32 = 3840;
-                const MAX_HEIGHT: u32 = 2160;
-                if img.width() > MAX_WIDTH || img.height() > MAX_HEIGHT {
-                    tracing::trace!("Resizing {}x{} from {path:?}", img.width(), img.height());
-                    img = img.resize(MAX_WIDTH, MAX_HEIGHT, image::imageops::FilterType::Triangle);
+                // lossless up to what the device can sample; beyond that
+                // (gigapixel mosaics) would need texture tiling
+                let max_dim = ctx.max_texture_dim.load(Ordering::Relaxed);
+                if img.width() > max_dim || img.height() > max_dim {
+                    tracing::debug!(
+                        "Downscaling {}x{} from {path:?} to the {max_dim}px device texture limit",
+                        img.width(),
+                        img.height(),
+                    );
                 }
+                img = Self::downscale_to_bucket(img, max_dim);
             }
             LoadClass::Thumb(bucket) => {
                 img = Self::downscale_to_bucket(img, bucket);
@@ -349,12 +377,148 @@ impl GenericImage {
     }
 }
 
+/// Blit pipeline that fills a texture's mip chain by successively
+/// downsampling each level from the one above, in linear space (the sRGB
+/// format decodes/encodes at sample/write time)
+#[derive(Debug)]
+pub struct MipGenerator {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: BindGroupLayout,
+    sampler: Sampler,
+}
+
+impl MipGenerator {
+    pub fn new(device: &Device, format: TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Mip blit shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Mip blit bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Mip blit pipeline layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Mip blit pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(format.into())],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+        }
+    }
+
+    fn generate(&self, device: &Device, queue: &Queue, texture: &wgpu::Texture) {
+        let mut encoder = device.create_command_encoder(&Default::default());
+
+        let views: Vec<_> = (0..texture.mip_level_count())
+            .map(|level| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+
+        for level in 1..views.len() {
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Mip blit bind group"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&views[level - 1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Mip blit pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &views[level],
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        queue.submit([encoder.finish()]);
+    }
+}
+
 #[derive(Debug)]
 pub struct RenderableImage {
     bind_group: BindGroup,
     vertex_buffer: LazyVertexBuffer,
     width: u32,
     height: u32,
+    mip_level_count: u32,
 }
 
 impl RenderableImage {
@@ -367,7 +531,24 @@ impl RenderableImage {
         queue: &Queue,
         bind_group_layout: &BindGroupLayout,
         sampler: &Sampler,
+        mips: Option<&MipGenerator>,
     ) -> Self {
+        // full chain when mipped: minification of huge textures aliases
+        // badly without it
+        let mip_level_count = match mips {
+            Some(_) => u32::BITS - img.width.max(img.height).leading_zeros(),
+            None => 1,
+        };
+
+        let usage = match mips {
+            Some(_) => {
+                TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_DST
+                    | TextureUsages::RENDER_ATTACHMENT
+            }
+            None => TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        };
+
         // Create GPU texture from the image data
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("RenderableImage texture"),
@@ -376,11 +557,11 @@ impl RenderableImage {
                 height: img.height,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
+            mip_level_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: img.format,
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            usage,
             view_formats: &[],
         });
 
@@ -423,11 +604,18 @@ impl RenderableImage {
             },
         );
 
+        if let Some(generator) = mips
+            && mip_level_count > 1
+        {
+            generator.generate(device, queue, &texture);
+        }
+
         Self {
             bind_group,
             vertex_buffer: LazyVertexBuffer::new(device),
             width: img.width,
             height: img.height,
+            mip_level_count,
         }
     }
 
@@ -437,6 +625,15 @@ impl RenderableImage {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    /// Approximate GPU memory of the texture (a full mip chain adds ~1/3)
+    pub fn gpu_bytes(&self) -> u64 {
+        let base = self.width as u64 * self.height as u64 * 4;
+        match self.mip_level_count > 1 {
+            true => base * 4 / 3,
+            false => base,
+        }
     }
 
     pub fn render(&mut self, renderpass: &mut RenderPass) {
