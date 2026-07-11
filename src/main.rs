@@ -51,6 +51,11 @@ struct Cli {
     /// needing more fail to load. 0 disables the limit
     #[arg(long, default_value_t = 8192)]
     max_decode_mem: u64,
+
+    /// Maximum GPU memory in MiB used for cached textures. 0 derives a
+    /// default from total system memory (25%, clamped to 512..=4096)
+    #[arg(long, default_value_t = 0)]
+    max_gpu_mem: u64,
 }
 
 impl Cli {
@@ -225,7 +230,8 @@ fn main() {
     };
 
     let max_decode_alloc = (cli.max_decode_mem > 0).then(|| cli.max_decode_mem * 1024 * 1024);
-    let mut app = App::new(paths, cursor_idx, max_decode_alloc);
+    let gpu_budget = (cli.max_gpu_mem > 0).then(|| cli.max_gpu_mem * 1024 * 1024);
+    let mut app = App::new(paths, cursor_idx, max_decode_alloc, gpu_budget);
     event_loop.run_app(&mut app).unwrap();
 }
 

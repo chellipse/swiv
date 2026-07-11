@@ -28,7 +28,11 @@ pub struct State {
 }
 
 impl State {
-    pub async fn new(window: Arc<Window>, req_sender: Sender<ImageRequest>) -> State {
+    pub async fn new(
+        window: Arc<Window>,
+        req_sender: Sender<ImageRequest>,
+        gpu_budget: u64,
+    ) -> State {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -253,7 +257,7 @@ impl State {
             cursor_bind_group,
             bind_group_layout,
             sampler,
-            image_cache: RefCell::new(ImageCache::new(req_sender)),
+            image_cache: RefCell::new(ImageCache::new(req_sender, gpu_budget)),
         };
 
         state.configure_surface();
@@ -295,6 +299,12 @@ impl State {
 
     pub fn set_title(&self, title: &str) {
         self.window.set_title(title);
+    }
+
+    /// See [`ImageCache::enforce_budget`]; true means the caller must
+    /// re-lay out the visible set before the next render
+    pub fn enforce_gpu_budget(&self) -> bool {
+        self.image_cache.borrow_mut().enforce_budget()
     }
 
     fn upload(&self, img: &GenericImage) -> RenderableImage {
@@ -389,6 +399,8 @@ impl State {
         class: LoadClass,
         show_cursor: bool,
     ) {
+        self.image_cache.borrow_mut().advance_frame();
+
         let surface_texture = self
             .surface
             .get_current_texture()

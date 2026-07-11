@@ -57,6 +57,11 @@ pub fn bucket_for(cell_px: u32) -> u32 {
 pub struct ImageCache {
     entries: HashMap<PathBuf, PathEntry>,
     req_sender: Sender<ImageRequest>,
+    /// Bumped once per rendered frame; entries touched in the current frame
+    /// are the working set and are never evicted
+    frame: u64,
+    gpu_bytes_total: u64,
+    gpu_budget: u64,
 }
 
 #[derive(Debug, Default)]
@@ -71,6 +76,8 @@ struct PathEntry {
 struct CacheEntry {
     cpu: CpuState,
     gpu: Option<RenderableImage>,
+    gpu_bytes: u64,
+    last_used: u64,
 }
 
 #[derive(Debug, Default)]
@@ -84,11 +91,31 @@ enum CpuState {
 }
 
 impl ImageCache {
-    pub fn new(req_sender: Sender<ImageRequest>) -> Self {
+    /// At most this many *large* Full entries stay resident: they can be far
+    /// larger than any thumb, and plain byte-budget lru would let one burst
+    /// of single-image navigation evict every thumbnail
+    const MAX_RESIDENT_FULL: usize = 3;
+
+    /// Full entries below this don't count toward [`Self::MAX_RESIDENT_FULL`]:
+    /// images smaller than the largest thumb bucket canonicalize to Full
+    /// (see [`LoadClass::canonicalize`]) and would otherwise thrash in a
+    /// gallery of small images
+    const LARGE_FULL_BYTES: u64 = 2048 * 2048 * 4;
+
+    pub fn new(req_sender: Sender<ImageRequest>, gpu_budget: u64) -> Self {
+        tracing::info!("GPU texture budget: {} MB", gpu_budget / 1_000_000);
         Self {
             entries: HashMap::new(),
             req_sender,
+            frame: 0,
+            gpu_bytes_total: 0,
+            gpu_budget,
         }
+    }
+
+    /// Marks the start of a new frame for working-set tracking
+    pub fn advance_frame(&mut self) {
+        self.frame += 1;
     }
 
     /// Read-only lookup of the best resident renderable for `class`: no
@@ -103,7 +130,9 @@ impl ImageCache {
         let entry = self.entries.get_mut(path)?;
         let class = class.canonicalize(entry.native);
         let best = Self::best_resident(&entry.classes, class)?;
-        entry.classes.get_mut(&best).unwrap().gpu.as_mut()
+        let entry = entry.classes.get_mut(&best).unwrap();
+        entry.last_used = self.frame;
+        entry.gpu.as_mut()
     }
 
     /// Advances the load state for `path` and returns the best renderable
@@ -168,7 +197,12 @@ impl ImageCache {
             };
             match resp {
                 Ok(img) => {
-                    entry.gpu = Some(upload(&img));
+                    let renderable = upload(&img);
+                    entry.gpu_bytes =
+                        renderable.width() as u64 * renderable.height() as u64 * 4;
+                    self.gpu_bytes_total += entry.gpu_bytes;
+                    entry.last_used = self.frame;
+                    entry.gpu = Some(renderable);
                     entry.cpu = CpuState::Uploaded;
                     // img dropped here: the CPU copy only lives until the
                     // pixels are on the GPU
@@ -183,7 +217,99 @@ impl ImageCache {
         }
 
         let best = Self::best_resident(&path_entry.classes, class)?;
-        path_entry.classes.get_mut(&best).unwrap().gpu.as_mut()
+        let entry = path_entry.classes.get_mut(&best).unwrap();
+        entry.last_used = self.frame;
+        entry.gpu.as_mut()
+    }
+
+    /// Evicts least-recently-used textures until the byte budget and the
+    /// resident-Full cap hold, never touching the current frame's working
+    /// set. Returns whether anything was evicted — the caller must then
+    /// re-lay out the visible set before rendering, since eviction can
+    /// promote a stale-or-never-laid-out sibling to "best resident".
+    pub fn enforce_budget(&mut self) -> bool {
+        let resident_large_fulls = self
+            .entries
+            .values()
+            .filter(|entry| {
+                entry.classes.get(&LoadClass::Full).is_some_and(|full| {
+                    full.gpu.is_some() && full.gpu_bytes > Self::LARGE_FULL_BYTES
+                })
+            })
+            .count();
+
+        if self.gpu_bytes_total <= self.gpu_budget
+            && resident_large_fulls <= Self::MAX_RESIDENT_FULL
+        {
+            return false;
+        }
+
+        // every unpinned resident entry, least recently used first
+        let mut candidates: Vec<(PathBuf, LoadClass, u64, u64)> = self
+            .entries
+            .iter()
+            .flat_map(|(path, path_entry)| {
+                path_entry
+                    .classes
+                    .iter()
+                    .filter(|(_, entry)| entry.gpu.is_some() && entry.last_used < self.frame)
+                    .map(|(class, entry)| (path.clone(), *class, entry.last_used, entry.gpu_bytes))
+            })
+            .collect();
+        candidates.sort_by_key(|(_, _, last_used, _)| *last_used);
+
+        let mut evicted = false;
+
+        let mut large_fulls = resident_large_fulls;
+        for (path, class, _, _) in candidates.iter().filter(|(_, class, _, gpu_bytes)| {
+            *class == LoadClass::Full && *gpu_bytes > Self::LARGE_FULL_BYTES
+        }) {
+            if large_fulls <= Self::MAX_RESIDENT_FULL {
+                break;
+            }
+            if self.evict(path, *class) {
+                large_fulls -= 1;
+                evicted = true;
+            }
+        }
+
+        for (path, class, _, _) in &candidates {
+            if self.gpu_bytes_total <= self.gpu_budget {
+                break;
+            }
+            evicted |= self.evict(path, *class);
+        }
+
+        if evicted {
+            tracing::debug!(
+                "GPU cache: {} MB resident after eviction",
+                self.gpu_bytes_total / 1_000_000
+            );
+        }
+        evicted
+    }
+
+    /// Idempotent; the entry re-materializes through the disk cache on the
+    /// next advancing lookup
+    fn evict(&mut self, path: &Path, class: LoadClass) -> bool {
+        let Some(entry) = self
+            .entries
+            .get_mut(path)
+            .and_then(|path_entry| path_entry.classes.get_mut(&class))
+        else {
+            return false;
+        };
+
+        if entry.gpu.is_none() {
+            return false;
+        }
+
+        tracing::trace!("Evicting {class:?} of {path:?}");
+        entry.gpu = None;
+        entry.cpu = CpuState::NotRequested;
+        self.gpu_bytes_total -= entry.gpu_bytes;
+        entry.gpu_bytes = 0;
+        true
     }
 
     /// The wanted class when resident, else the nearest resident fallback,

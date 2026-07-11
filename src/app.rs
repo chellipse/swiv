@@ -126,6 +126,8 @@ pub struct App {
     images: Vec<LazyImage>,
     image_loader_service: ImageLoaderService,
     sys: sysinfo::System,
+    /// resolved GPU texture budget in bytes, handed to [`State`] on creation
+    gpu_budget: u64,
 
     /// Store the state from it so it can be accessed by methods triggered
     /// from [`Keymap::apply`] calls
@@ -171,6 +173,7 @@ impl App {
         paths: Vec<PathBuf>,
         cursor_idx: Option<usize>,
         max_decode_alloc: Option<u64>,
+        gpu_budget_override: Option<u64>,
     ) -> Self {
         let image_loader_service = ImageLoaderService::new(0, max_decode_alloc);
 
@@ -197,6 +200,13 @@ impl App {
         let mut sys = sysinfo::System::new();
         sys.refresh_memory();
 
+        // textures live in system memory on integrated GPUs, so the default
+        // is derived from (and bounded well below) total system memory
+        let gpu_budget = gpu_budget_override.unwrap_or_else(|| {
+            const MIB: u64 = 1024 * 1024;
+            (sys.total_memory() / 4).clamp(512 * MIB, 4096 * MIB)
+        });
+
         let mode = match cursor_idx {
             Some(_) => Mode::SingleImage,
             None => Mode::Gallery,
@@ -222,6 +232,7 @@ impl App {
             exiting,
             exit_msg: None,
             sys,
+            gpu_budget,
             scale: 1.0,
         }
     }
@@ -614,6 +625,7 @@ impl ApplicationHandler for App {
         let state = pollster::block_on(State::new(
             window.clone(),
             self.image_loader_service.clone_sender(),
+            self.gpu_budget,
         ));
         self.state = Some(state);
 
@@ -636,6 +648,13 @@ impl ApplicationHandler for App {
                         println!("{}: {msg}", env!("CARGO_PKG_NAME"));
                     }
                     std::process::exit(0);
+                }
+
+                // eviction can change which resident class is "best" for a
+                // visible image, whose vertices may be stale or unset — so
+                // a re-layout must happen before the render below
+                if self.state.as_ref().unwrap().enforce_gpu_budget() {
+                    self.resize();
                 }
 
                 match self.mode {
