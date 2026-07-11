@@ -50,6 +50,14 @@ impl LazyImage {
     }
 }
 
+/// Configuration shared by all decode workers
+#[derive(Debug, Clone)]
+pub struct DecodeContext {
+    pub disk_cache: Option<ThumbDiskCache>,
+    /// Decodes predicted to allocate more than this fail; None = unlimited
+    pub max_alloc: Option<u64>,
+}
+
 pub struct ImageRequest {
     pub response_channel: Sender<Result<GenericImage>>,
     pub path: PathBuf,
@@ -70,8 +78,8 @@ impl ImageRequest {
     }
 
     /// Returns whether the result was an error
-    pub fn eval(self, disk_cache: Option<&ThumbDiskCache>) -> bool {
-        let result = GenericImage::decode(&self.path, self.class, disk_cache);
+    pub fn eval(self, ctx: &DecodeContext) -> bool {
+        let result = GenericImage::decode(&self.path, self.class, ctx);
         let is_err = result.is_err();
         self.response_channel.send(result).unwrap();
         is_err
@@ -91,7 +99,7 @@ impl ImageLoaderService {
     const MIN_PAR: usize = 1;
     const MAX_PAR: usize = 4;
 
-    pub fn new(parallelism: usize) -> Self {
+    pub fn new(parallelism: usize, max_alloc: Option<u64>) -> Self {
         let parallelism = match (parallelism, thread::available_parallelism()) {
             (0, Ok(b)) => b.get(),
             (0, Err(_)) => Self::MIN_PAR,
@@ -111,20 +119,25 @@ impl ImageLoaderService {
             }
         };
 
+        let ctx = DecodeContext {
+            disk_cache,
+            max_alloc,
+        };
+
         let (completion_sender, completion_receiver) = unbounded();
         let (sender, receiver) = unbounded::<ImageRequest>();
         let mut handles = Vec::new();
         for id in 0..parallelism {
             let receiver = receiver.clone();
             let completion_sender = completion_sender.clone();
-            let disk_cache = disk_cache.clone();
+            let ctx = ctx.clone();
 
             let handle = thread::spawn(move || loop {
                 match receiver.recv() {
                     Ok(req) => {
                         let path = req.path.clone();
                         tracing::trace!("Request on {id}:{:?}", path);
-                        let was_err = req.eval(disk_cache.as_ref());
+                        let was_err = req.eval(&ctx);
                         let _ = completion_sender.send((path, was_err));
                     }
                     Err(_) => break,
@@ -175,14 +188,10 @@ impl GenericImage {
     /// Decode entry point, wrapping the backends with the thumbnail disk
     /// cache. Format sniffing and dispatch to backends beyond image-rs
     /// (e.g. camera raws via rawler) will slot in here.
-    pub fn decode(
-        path: impl AsRef<Path>,
-        class: LoadClass,
-        disk_cache: Option<&ThumbDiskCache>,
-    ) -> Result<Self> {
+    pub fn decode(path: impl AsRef<Path>, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
         let path = path.as_ref();
-        let (LoadClass::Thumb(bucket), Some(cache)) = (class, disk_cache) else {
-            return Self::decode_image_rs(path, class);
+        let (LoadClass::Thumb(bucket), Some(cache)) = (class, ctx.disk_cache.as_ref()) else {
+            return Self::decode_image_rs(path, class, ctx.max_alloc);
         };
 
         if let Some(img) = cache.load(path, bucket) {
@@ -200,7 +209,7 @@ impl GenericImage {
             return Ok(this);
         }
 
-        let this = Self::decode_image_rs(path, class)?;
+        let this = Self::decode_image_rs(path, class, ctx.max_alloc)?;
         cache.store(path, bucket, this.width, this.height, &this.bytes);
         Ok(this)
     }
@@ -231,15 +240,24 @@ impl GenericImage {
         img.resize(bucket, bucket, image::imageops::FilterType::Lanczos3)
     }
 
-    fn decode_image_rs(path: impl AsRef<Path>, class: LoadClass) -> Result<Self> {
+    fn decode_image_rs(
+        path: impl AsRef<Path>,
+        class: LoadClass,
+        max_alloc: Option<u64>,
+    ) -> Result<Self> {
         tracing::trace!("Loading {:?} as {class:?}", path.as_ref());
 
         let file = File::open(&path)?;
         let reader = BufReader::new(file);
 
-        let mut decoder = ImageReader::new(reader)
-            .with_guessed_format()?
-            .into_decoder()?;
+        let mut reader = ImageReader::new(reader).with_guessed_format()?;
+        // replace the default 512MiB output cap, which silently rejects
+        // legitimate giant images (gigapixel mosaics), with the user's
+        // configured decode budget
+        let mut limits = image::Limits::no_limits();
+        limits.max_alloc = max_alloc;
+        reader.limits(limits);
+        let mut decoder = reader.into_decoder()?;
         let icc_profile = decoder.icc_profile()?;
         let mut img = DynamicImage::from_decoder(decoder)?;
 

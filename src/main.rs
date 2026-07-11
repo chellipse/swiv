@@ -46,6 +46,11 @@ struct Cli {
     /// The file is truncated at startup
     #[arg(long)]
     mem_usage_csv_path: Option<PathBuf>,
+
+    /// Maximum memory in MiB a single image decode may allocate; images
+    /// needing more fail to load. 0 disables the limit
+    #[arg(long, default_value_t = 8192)]
+    max_decode_mem: u64,
 }
 
 impl Cli {
@@ -219,7 +224,8 @@ fn main() {
         }
     };
 
-    let mut app = App::new(paths, cursor_idx);
+    let max_decode_alloc = (cli.max_decode_mem > 0).then(|| cli.max_decode_mem * 1024 * 1024);
+    let mut app = App::new(paths, cursor_idx, max_decode_alloc);
     event_loop.run_app(&mut app).unwrap();
 }
 

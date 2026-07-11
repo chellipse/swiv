@@ -167,8 +167,12 @@ impl App {
     const ROW_NO_MAX: u32 = 32;
     const ROW_NO_DEFAULT: u32 = 4;
 
-    pub fn new(paths: Vec<PathBuf>, cursor_idx: Option<usize>) -> Self {
-        let image_loader_service = ImageLoaderService::new(0);
+    pub fn new(
+        paths: Vec<PathBuf>,
+        cursor_idx: Option<usize>,
+        max_decode_alloc: Option<u64>,
+    ) -> Self {
+        let image_loader_service = ImageLoaderService::new(0, max_decode_alloc);
 
         tracing::info!("Path count: {}", paths.len());
         const NO_FIRST_DISPLAYED: usize = 10;
