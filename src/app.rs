@@ -412,6 +412,9 @@ impl App {
 
         if self.images.len() == 0 {
             self.exit_msg("No images left to display. aborting".to_string());
+            // nothing below is safe on an empty collection; the caller
+            // checks the exiting flag
+            return;
         }
 
         if self.cursor_idx >= self.images.len() {
@@ -616,14 +619,16 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
+                self.resize_fresh_images();
+
+                // checked after resize_fresh_images: it may have just
+                // emptied the collection, which rendering cannot survive
                 if self.exiting {
                     if let Some(msg) = &self.exit_msg {
                         println!("{}: {msg}", env!("CARGO_PKG_NAME"));
                     }
                     std::process::exit(0);
                 }
-
-                self.resize_fresh_images();
 
                 match self.mode {
                     Mode::Gallery => {

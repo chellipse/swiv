@@ -174,7 +174,9 @@ impl ImageCache {
                     // pixels are on the GPU
                 }
                 Err(e) => {
-                    tracing::debug!("Load failed: {e:?} from {path:?}");
+                    // warn: this is the only place the user can learn why
+                    // an image was dropped from the collection
+                    tracing::warn!("Load failed: {e:?} from {path:?}");
                     entry.cpu = CpuState::Failed;
                 }
             }
