@@ -34,10 +34,10 @@
         libxkbcommon
         vulkan-headers
         vulkan-loader
-        vulkan-tools
-        vulkan-tools-lunarg
-        vulkan-extension-layer
-        vulkan-validation-layers
+        # vulkan-tools
+        # vulkan-tools-lunarg
+        # vulkan-extension-layer
+        # vulkan-validation-layers
         dav1d
       ];
 
