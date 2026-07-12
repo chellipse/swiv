@@ -9,7 +9,7 @@ use clap::Parser;
 use itertools::Itertools;
 use winit::event_loop::{ControlFlow, EventLoop};
 
-use swiv::{app::App, tracing_format::CustomFormat};
+use swiv::{app::App, raw::RawMode, tracing_format::CustomFormat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -56,6 +56,11 @@ struct Cli {
     /// default from total system memory (25%, clamped to 512..=4096)
     #[arg(long, default_value_t = 0)]
     max_gpu_mem: u64,
+
+    /// How camera raws are rendered in single image mode (thumbnails
+    /// always use the embedded previews)
+    #[arg(long, value_enum, default_value_t = RawMode::Preview)]
+    raw_mode: RawMode,
 }
 
 impl Cli {
@@ -80,6 +85,10 @@ impl Cli {
                 "farbfeld", "ff", "pnm", "pbm", "pgm", "pam", "ppm", "hdr", "exr", "qoi", "avif",
                 // via the psd backend
                 "psd", "psb",
+                // camera raws via the rawler backend
+                "ari", "arw", "cr2", "cr3", "crm", "crw", "dcr", "dcs", "dng", "erf", "iiq",
+                "kdc", "mef", "mos", "mrw", "nef", "nrw", "orf", "ori", "pef", "raf", "raw",
+                "rw2", "rwl", "srw", "3fr", "fff", "x3f", "qtk",
             ];
             iter = Box::new(iter.filter(|path| {
                 path.extension()
@@ -233,7 +242,7 @@ fn main() {
 
     let max_decode_alloc = (cli.max_decode_mem > 0).then(|| cli.max_decode_mem * 1024 * 1024);
     let gpu_budget = (cli.max_gpu_mem > 0).then(|| cli.max_gpu_mem * 1024 * 1024);
-    let mut app = App::new(paths, cursor_idx, max_decode_alloc, gpu_budget);
+    let mut app = App::new(paths, cursor_idx, max_decode_alloc, gpu_budget, cli.raw_mode);
     event_loop.run_app(&mut app).unwrap();
 }
 

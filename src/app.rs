@@ -19,6 +19,7 @@ use crate::{
     cache::{bucket_for, LoadClass},
     keymap::{KeySpec, Keymap, MappableApp},
     lazy::{ImageLoaderService, LazyImage},
+    raw::RawMode,
     state::State,
 };
 
@@ -177,6 +178,7 @@ impl App {
         cursor_idx: Option<usize>,
         max_decode_alloc: Option<u64>,
         gpu_budget_override: Option<u64>,
+        raw_mode: RawMode,
     ) -> Self {
         // safe default until the render state publishes the device's real
         // limit; requests can't fire before then (they originate from the
@@ -184,7 +186,7 @@ impl App {
         let max_texture_dim = Arc::new(AtomicU32::new(8192));
 
         let image_loader_service =
-            ImageLoaderService::new(0, max_decode_alloc, max_texture_dim.clone());
+            ImageLoaderService::new(0, max_decode_alloc, max_texture_dim.clone(), raw_mode);
 
         tracing::info!("Path count: {}", paths.len());
         const NO_FIRST_DISPLAYED: usize = 10;

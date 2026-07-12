@@ -13,7 +13,8 @@ use crate::cache::LADDER;
 /// Bump to invalidate all cached thumbnails whenever the decode pipeline
 /// changes in a way that alters output pixels (filters, ICC handling, new
 /// backends). The janitor removes directories of other versions.
-const CACHE_VERSION: u32 = 1;
+/// v2: EXIF orientation is now applied
+const CACHE_VERSION: u32 = 2;
 
 const DISK_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
 

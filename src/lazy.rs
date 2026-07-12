@@ -11,15 +11,17 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use image::{DynamicImage, EncodableLayout, ImageDecoder, ImageReader, RgbaImage};
+use image::{
+    metadata::Orientation, DynamicImage, EncodableLayout, ImageDecoder, ImageReader, RgbaImage,
+};
 use wgpu::{
     util::DeviceExt, BindGroup, BindGroupLayout, Buffer, Device, Queue, RenderPass, Sampler,
     TextureFormat, TextureUsages,
 };
 
-use crate::{cache::LoadClass, disk_cache::ThumbDiskCache};
+use crate::{cache::LoadClass, disk_cache::ThumbDiskCache, raw::RawMode};
 
 /// A path in the image collection plus its current gallery slot.
 /// Load state lives in [`crate::cache::ImageCache`], keyed by the path.
@@ -64,6 +66,8 @@ pub struct DecodeContext {
     /// Serializes decodes with giant intermediate buffers, see
     /// [`GenericImage::decode_backend`]
     pub huge_decode_lock: Arc<Mutex<()>>,
+    /// How Full-resolution raws are rendered
+    pub raw_mode: RawMode,
 }
 
 pub struct ImageRequest {
@@ -111,6 +115,7 @@ impl ImageLoaderService {
         parallelism: usize,
         max_alloc: Option<u64>,
         max_texture_dim: Arc<AtomicU32>,
+        raw_mode: RawMode,
     ) -> Self {
         let parallelism = match (parallelism, thread::available_parallelism()) {
             (0, Ok(b)) => b.get(),
@@ -136,6 +141,7 @@ impl ImageLoaderService {
             max_alloc,
             max_texture_dim,
             huge_decode_lock: Arc::new(Mutex::new(())),
+            raw_mode,
         };
 
         let (completion_sender, completion_receiver) = unbounded();
@@ -202,6 +208,13 @@ impl GenericImage {
         if Self::is_psd(path) {
             return crate::psd::probe_dimensions(path);
         }
+        if crate::raw::is_raw(path) {
+            // rawler mmaps with populate(), far too heavy for the ui-thread
+            // probe. skipping costs nothing: sensors are all larger than the
+            // biggest thumb bucket, so canonicalization never applies, and
+            // raw preview decodes never cross the huge-decode threshold
+            bail!("raw files are not probed");
+        }
 
         let file = File::open(path)?;
         let reader = BufReader::new(file);
@@ -255,9 +268,10 @@ impl GenericImage {
             _ => None,
         };
 
-        match Self::is_psd(path) {
-            true => Self::decode_psd(path, class, ctx),
-            false => Self::decode_image_rs(path, class, ctx),
+        match path {
+            p if Self::is_psd(p) => Self::decode_psd(p, class, ctx),
+            p if crate::raw::is_raw(p) => Self::decode_raw(p, class, ctx),
+            p => Self::decode_image_rs(p, class, ctx),
         }
     }
 
@@ -268,7 +282,43 @@ impl GenericImage {
         let img = RgbaImage::from_raw(composite.width, composite.height, composite.rgba)
             .ok_or_else(|| anyhow!("psd composite buffer size mismatch"))?;
 
-        Self::finish_decode(DynamicImage::ImageRgba8(img), composite.icc, class, path, ctx)
+        Self::finish_decode(
+            DynamicImage::ImageRgba8(img),
+            composite.icc,
+            None,
+            class,
+            path,
+            ctx,
+        )
+    }
+
+    fn decode_raw(path: &Path, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
+        tracing::trace!("Loading {path:?} as {class:?} via raw backend");
+
+        let preview = match (class, ctx.raw_mode) {
+            // thumbs always come from embedded previews: developing sensor
+            // data for a gallery cell would be absurd
+            (LoadClass::Thumb(bucket), _) => crate::raw::decode_preview(path, Some(bucket))?,
+            (LoadClass::Full, RawMode::Preview) => crate::raw::decode_preview(path, None)?,
+            (LoadClass::Full, RawMode::Develop) => {
+                // develop buffers are always big enough to count as huge
+                // (the extension-based probe skip bypasses the usual check)
+                let _guard = ctx.huge_decode_lock.lock().unwrap();
+                crate::raw::develop(path).or_else(|e| {
+                    tracing::warn!("Raw develop failed for {path:?} ({e:?}); using the preview");
+                    crate::raw::decode_preview(path, None)
+                })?
+            }
+        };
+
+        Self::finish_decode(
+            preview.image,
+            preview.icc,
+            preview.orientation,
+            class,
+            path,
+            ctx,
+        )
     }
 
     /// For pixels that are already sRGB (i.e. out of the disk cache); no
@@ -311,17 +361,19 @@ impl GenericImage {
         limits.max_alloc = ctx.max_alloc;
         reader.limits(limits);
         let mut decoder = reader.into_decoder()?;
+        let orientation = decoder.orientation().ok();
         let icc_profile = decoder.icc_profile()?;
         let img = DynamicImage::from_decoder(decoder)?;
 
-        Self::finish_decode(img, icc_profile, class, path.as_ref(), ctx)
+        Self::finish_decode(img, icc_profile, orientation, class, path.as_ref(), ctx)
     }
 
-    /// Shared tail of every decode backend: class-dependent sizing, RGBA8
-    /// conversion, and the ICC transform to sRGB
+    /// Shared tail of every decode backend: class-dependent sizing, EXIF
+    /// orientation, RGBA8 conversion, and the ICC transform to sRGB
     fn finish_decode(
         mut img: DynamicImage,
         icc_profile: Option<Vec<u8>>,
+        orientation: Option<Orientation>,
         class: LoadClass,
         path: &Path,
         ctx: &DecodeContext,
@@ -343,6 +395,12 @@ impl GenericImage {
             LoadClass::Thumb(bucket) => {
                 img = Self::downscale_to_bucket(img, bucket);
             }
+        }
+
+        // after sizing on purpose: both sizing boxes are square, so the
+        // result is identical and the rotation touches far fewer pixels
+        if let Some(orientation) = orientation {
+            img.apply_orientation(orientation);
         }
 
         let width = img.width();
