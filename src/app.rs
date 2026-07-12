@@ -317,15 +317,15 @@ impl App {
     }
 
     pub fn zoom_reset(&mut self) {
-        self.scale = 1.0;
+        self.set_scale(1.0);
     }
 
     pub fn zoom_in(&mut self) {
-        self.scale *= 1.1;
+        self.set_scale(self.scale * 1.1);
     }
 
     pub fn zoom_out(&mut self) {
-        self.scale *= 0.9;
+        self.set_scale(self.scale * 0.9);
     }
 
     pub fn drag_start(&mut self) {
@@ -520,6 +520,21 @@ impl App {
         self.window_size = Some(size);
         self.col_no_recalc();
         self.ensure_cursor_visible();
+    }
+
+    /// Zooming scales the pan offset along, so the image point at the
+    /// screen center stays fixed: zoom happens "around" whatever was
+    /// dragged into view, while dragging itself stays 1:1 with the cursor
+    /// at any zoom level
+    pub fn set_scale(&mut self, value: f32) {
+        // the additive touchpad zoom path could otherwise reach zero or
+        // negative scale, breaking rendering and the ratio below
+        let value = value.max(0.01);
+
+        let ratio = (value / self.scale) as f64;
+        self.scale = value;
+        self.drag_total.x *= ratio;
+        self.drag_total.y *= ratio;
     }
 }
 
@@ -723,7 +738,7 @@ impl ApplicationHandler for App {
                     }
                     (Mode::SingleImage, MouseScrollDelta::PixelDelta(pos)) => {
                         let delta = pos.y as f32 / self.window_size.unwrap().height as f32;
-                        self.scale += delta;
+                        self.set_scale(self.scale + delta);
                     }
                     _ => need_resize = false,
                 }
