@@ -476,8 +476,8 @@ impl MipGenerator {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Mip blit pipeline layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -498,7 +498,7 @@ impl MipGenerator {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -560,6 +560,7 @@ impl MipGenerator {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
@@ -770,12 +771,23 @@ impl LazyVertexBuffer {
         let is_mapped = self.mapped.clone();
         vertex_buffer.map_async(wgpu::MapMode::Write, .., move |result| {
             if result.is_ok() {
-                let mut view = capturable.get_mapped_range_mut(..);
-                let floats: &mut [f32] = bytemuck::cast_slice_mut(&mut view);
-                floats.copy_from_slice(&vertices.finish());
-                drop(view);
-                capturable.unmap();
-                is_mapped.store(false, Ordering::Release);
+                match capturable.get_mapped_range_mut(..) {
+                    Ok(mut view) => {
+                        // BufferViewMut is write-only in wgpu 30 (mapped
+                        // memory may be write-combining)
+                        view.copy_from_slice(bytemuck::cast_slice(&vertices.finish()));
+                        drop(view);
+                        capturable.unmap();
+                        is_mapped.store(false, Ordering::Release);
+                    }
+                    Err(e) => {
+                        // can't happen after a successful map; recover the
+                        // buffer for future resizes anyway
+                        tracing::warn!("Mapped range unavailable: {e:?}");
+                        capturable.unmap();
+                        is_mapped.store(false, Ordering::Release);
+                    }
+                }
             }
         });
     }

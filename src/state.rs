@@ -41,7 +41,7 @@ impl State {
         gpu_budget: u64,
         max_texture_dim: Arc<AtomicU32>,
     ) -> State {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
@@ -107,8 +107,8 @@ impl State {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -117,7 +117,7 @@ impl State {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -134,7 +134,7 @@ impl State {
                             format: wgpu::VertexFormat::Float32x2,
                         },
                     ],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -150,7 +150,7 @@ impl State {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -161,7 +161,7 @@ impl State {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -176,7 +176,7 @@ impl State {
                             format: wgpu::VertexFormat::Float32x2,
                         },
                     ],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -199,7 +199,7 @@ impl State {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -209,7 +209,7 @@ impl State {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             anisotropy_clamp: 4, // Might not be needed with mipmapping
             ..Default::default()
         });
@@ -321,6 +321,7 @@ impl State {
             height: self.size.height,
             desired_maximum_frame_latency: 2,
             present_mode: wgpu::PresentMode::AutoVsync,
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
         self.surface.configure(&self.device, &surface_config);
     }
@@ -394,7 +395,7 @@ impl State {
         self.cursor_buffer
             .borrow_mut()
             .resize(Vertices::new().gallery_cursor(ww, wh, row_no, col_no, cursor_idx));
-        let _ = self.device.poll(PollType::Wait);
+        let _ = self.device.poll(PollType::wait_indefinitely());
     }
 
     pub fn resize_single_image<'a>(
@@ -422,7 +423,7 @@ impl State {
                 offset_y,
             ));
 
-            let _ = self.device.poll(PollType::Wait);
+            let _ = self.device.poll(PollType::wait_indefinitely());
         }
     }
 
@@ -434,10 +435,19 @@ impl State {
     ) {
         self.image_cache.borrow_mut().advance_frame();
 
-        let surface_texture = self
-            .surface
-            .get_current_texture()
-            .expect("failed to acquire next swapchain texture");
+        let surface_texture = match self.surface.get_current_texture() {
+            // suboptimal: the Resized event path reconfigures the surface,
+            // so just render this frame as-is
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            other => {
+                // the sleep stops the continuous-redraw loop from spinning
+                // at full speed while e.g. occluded
+                tracing::debug!("Skipping frame: {other:?}");
+                std::thread::sleep(std::time::Duration::from_millis(16));
+                return;
+            }
+        };
         let texture_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor {
@@ -460,6 +470,7 @@ impl State {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         renderpass.set_pipeline(&self.render_pipeline);
@@ -483,6 +494,6 @@ impl State {
 
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
-        surface_texture.present();
+        self.queue.present(surface_texture);
     }
 }
