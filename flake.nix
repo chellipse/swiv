@@ -50,30 +50,40 @@
         ]
       );
 
-    in
-    {
-      packages.${system}.default = rustPlatform.buildRustPackage rec {
-        pname = "swiv";
-        version = "0.1.0";
+      mkSwiv =
+        targetCpu:
+        rustPlatform.buildRustPackage rec {
+          pname = "swiv";
+          version = "0.1.0";
 
-        src = pkgs.lib.cleanSourceWith {
-          src = ./.;
-          filter =
-            path: type:
-            (pkgs.lib.hasSuffix ".wgsl" path)
-            || (pkgs.lib.cleanSourceFilter path type)
-            || (builtins.match ".*/(Cargo\\.toml|Cargo\\.lock|src/.*)" path != null);
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: type:
+              (pkgs.lib.hasSuffix ".wgsl" path)
+              || (pkgs.lib.cleanSourceFilter path type)
+              || (builtins.match ".*/(Cargo\\.toml|Cargo\\.lock|src/.*)" path != null);
+          };
+
+          cargoLock.lockFile = ./Cargo.lock;
+
+          buildInputs = inputs;
+
+          nativeBuildInputs = [ pkgs.pkg-config ];
+
+          RUSTFLAGS = pkgs.lib.optionalString (targetCpu != null) "-C target-cpu=${targetCpu}";
+
+          postFixup = ''
+            patchelf --set-rpath ${libPath} $out/bin/${pname}
+          '';
         };
 
-        cargoLock.lockFile = ./Cargo.lock;
-
-        buildInputs = inputs;
-
-        nativeBuildInputs = [ pkgs.pkg-config ];
-
-        postFixup = ''
-          patchelf --set-rpath ${libPath} $out/bin/${pname}
-        '';
+    in
+    {
+      packages.${system} = {
+        default = mkSwiv null;
+        native = mkSwiv "native";
+        x86-64-v3 = mkSwiv "x86-64-v3";
       };
 
       devShells.${system}.default = pkgs.mkShell {
@@ -87,7 +97,7 @@
 
         # wanted to avoid setting RUSTFLAGS for this but using LD_LIBRARY_PATH
         # makes checking whether builds work possibly confusing
-        RUSTFLAGS = "-C link-arg=-Wl,-rpath,${libPath}";
+        RUSTFLAGS = "-C link-arg=-Wl,-rpath,${libPath} -C target-cpu=native";
 
         env = {
           UV_PYTHON_DOWNLOADS = "never";
