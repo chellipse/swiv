@@ -11,7 +11,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use image::{
     metadata::Orientation, DynamicImage, EncodableLayout, ImageDecoder, ImageReader, RgbaImage,
@@ -223,10 +223,24 @@ impl GenericImage {
             .into_dimensions()?)
     }
 
-    /// Decode entry point, wrapping the backends with the thumbnail disk
-    /// cache
+    /// Decode entry point, validating the result before it can reach a
+    /// texture upload
     pub fn decode(path: impl AsRef<Path>, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
-        let path = path.as_ref();
+        let this = Self::decode_cached(path.as_ref(), class, ctx)?;
+        // wgpu panics on zero-dimension textures; real files decode to this
+        // (gifs with a 0x0 logical screen descriptor). validated here rather
+        // than per-backend so disk-cache hits are covered too
+        ensure!(
+            this.width > 0 && this.height > 0,
+            "decoded to a zero-sized image ({}x{})",
+            this.width,
+            this.height
+        );
+        Ok(this)
+    }
+
+    /// Wraps the backends with the thumbnail disk cache
+    fn decode_cached(path: &Path, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
         let (LoadClass::Thumb(bucket), Some(cache)) = (class, ctx.disk_cache.as_ref()) else {
             return Self::decode_backend(path, class, ctx);
         };
