@@ -5,7 +5,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use image::DynamicImage;
 
 use crate::cache::LADDER;
@@ -35,7 +35,10 @@ impl ThumbDiskCache {
         let cache_home = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|h| PathBuf::from(h).join(".cache"))
+            })
             .ok_or(anyhow!("neither XDG_CACHE_HOME nor HOME is set"))?;
 
         let root = cache_home
@@ -69,7 +72,11 @@ impl ThumbDiskCache {
     }
 
     fn entry_path(&self, src: &Path, bucket: u32) -> Option<PathBuf> {
-        Some(self.root.join(bucket.to_string()).join(Self::entry_name(src)?))
+        Some(
+            self.root
+                .join(bucket.to_string())
+                .join(Self::entry_name(src)?),
+        )
     }
 
     pub fn load(&self, src: &Path, bucket: u32) -> Option<DynamicImage> {
@@ -96,7 +103,14 @@ impl ThumbDiskCache {
 
     /// Best effort: failures are logged and swallowed, the thumb will just
     /// be regenerated next run
-    pub fn store(&self, src: &Path, bucket: u32, width: u32, height: u32, bytes: &[u8]) {
+    pub fn store(
+        &self,
+        src: &Path,
+        bucket: u32,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+    ) {
         let Some(path) = self.entry_path(src, bucket) else {
             return;
         };
@@ -139,7 +153,10 @@ fn janitor(root: &Path) -> Result<()> {
     if let Some(parent) = root.parent() {
         for entry in fs::read_dir(parent)?.flatten() {
             if Some(entry.file_name().as_os_str()) != root.file_name() {
-                tracing::debug!("Removing stale cache version: {:?}", entry.path());
+                tracing::debug!(
+                    "Removing stale cache version: {:?}",
+                    entry.path()
+                );
                 let _ = fs::remove_dir_all(entry.path());
             }
         }
@@ -160,7 +177,9 @@ fn janitor(root: &Path) -> Result<()> {
             // leftover partial writes from crashed runs; the age guard
             // avoids racing a concurrently running instance
             if path.extension().is_some_and(|e| e == "tmp") {
-                if mtime.elapsed().unwrap_or_default() > Duration::from_secs(24 * 60 * 60) {
+                if mtime.elapsed().unwrap_or_default()
+                    > Duration::from_secs(24 * 60 * 60)
+                {
                     let _ = fs::remove_file(&path);
                 }
                 continue;

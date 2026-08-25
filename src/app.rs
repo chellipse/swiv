@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     ops::*,
     path::PathBuf,
-    sync::{atomic::AtomicU32, Arc, LazyLock},
+    sync::{Arc, LazyLock, atomic::AtomicU32},
 };
 
 use itertools::{Either, Itertools};
@@ -16,7 +16,7 @@ use winit::{
 };
 
 use crate::{
-    cache::{bucket_for, LoadClass},
+    cache::{LoadClass, bucket_for},
     keymap::{KeySpec, Keymap, MappableApp},
     lazy::{ImageLoaderService, LazyImage},
     raw::RawMode,
@@ -91,7 +91,11 @@ impl Point2 {
     }
 
     /// Convert from normalized device coordinates (-1.0 to 1.0) back to screen coordinates
-    pub fn from_ndc(ndc_x: f64, ndc_y: f64, window_size: &PhysicalSize<u32>) -> Self {
+    pub fn from_ndc(
+        ndc_x: f64,
+        ndc_y: f64,
+        window_size: &PhysicalSize<u32>,
+    ) -> Self {
         let x = (ndc_x + 1.0) * 0.5 * window_size.width as f64;
         let y = (1.0 - ndc_y) * 0.5 * window_size.height as f64;
         Self::new(x, y)
@@ -185,8 +189,12 @@ impl App {
         // render state's cache)
         let max_texture_dim = Arc::new(AtomicU32::new(8192));
 
-        let image_loader_service =
-            ImageLoaderService::new(0, max_decode_alloc, max_texture_dim.clone(), raw_mode);
+        let image_loader_service = ImageLoaderService::new(
+            0,
+            max_decode_alloc,
+            max_texture_dim.clone(),
+            raw_mode,
+        );
 
         tracing::info!("Path count: {}", paths.len());
         const NO_FIRST_DISPLAYED: usize = 10;
@@ -195,10 +203,7 @@ impl App {
             &paths[..paths.len().saturating_sub(1).min(NO_FIRST_DISPLAYED)]
         );
 
-        let images: Vec<_> = paths
-            .into_iter()
-            .map(LazyImage::new)
-            .collect();
+        let images: Vec<_> = paths.into_iter().map(LazyImage::new).collect();
 
         let mut exiting = false;
         if images.len() == 0 {
@@ -307,7 +312,9 @@ impl App {
     }
 
     pub fn up(&mut self) {
-        self.set_cursor_idx(self.cursor_idx.saturating_sub(self.col_no as usize));
+        self.set_cursor_idx(
+            self.cursor_idx.saturating_sub(self.col_no as usize),
+        );
     }
 
     pub fn down(&mut self) {
@@ -454,10 +461,9 @@ impl App {
 
         match self.mode {
             Mode::Gallery => {
-                let images = self
-                    .visible_grid_images()
-                    .iter()
-                    .filter(|img| were_images_removed || non_err_paths.contains(img.path()));
+                let images = self.visible_grid_images().iter().filter(|img| {
+                    were_images_removed || non_err_paths.contains(img.path())
+                });
                 let size = self.window_size.unwrap();
                 self.state.as_ref().unwrap().resize(
                     images,
@@ -489,7 +495,9 @@ impl App {
         if self.cursor_idx != value {
             self.cursor_idx = value;
             self.ensure_cursor_visible();
-            if let Some(path) = self.images[self.cursor_idx].path().as_os_str().to_str() {
+            if let Some(path) =
+                self.images[self.cursor_idx].path().as_os_str().to_str()
+            {
                 let title = format!("{}: {}", env!("CARGO_PKG_NAME"), path);
                 self.state.as_ref().unwrap().set_title(&title);
             }
@@ -584,7 +592,8 @@ impl App {
             self.row_offset = cursor_row;
         } else if cursor_row >= visible_end_row {
             // Cursor is below visible area, scroll down
-            self.row_offset = cursor_row.saturating_sub(self.row_no as usize - 1);
+            self.row_offset =
+                cursor_row.saturating_sub(self.row_no as usize - 1);
         }
     }
 }
@@ -645,7 +654,10 @@ impl ApplicationHandler for App {
         tracing::debug!("Creating window...");
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes().with_title(env!("CARGO_PKG_NAME")))
+                .create_window(
+                    Window::default_attributes()
+                        .with_title(env!("CARGO_PKG_NAME")),
+                )
                 .unwrap(),
         );
 
@@ -660,7 +672,12 @@ impl ApplicationHandler for App {
         window.request_redraw();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _id: WindowId,
+        event: WindowEvent,
+    ) {
         match event {
             WindowEvent::CloseRequested => {
                 tracing::debug!("The close button was pressed; stopping");
@@ -688,10 +705,11 @@ impl ApplicationHandler for App {
                 match self.mode {
                     Mode::Gallery => {
                         let images = self.visible_grid_images().iter();
-                        self.state
-                            .as_ref()
-                            .unwrap()
-                            .render(images, self.gallery_class(), true);
+                        self.state.as_ref().unwrap().render(
+                            images,
+                            self.gallery_class(),
+                            true,
+                        );
                     }
                     Mode::SingleImage => {
                         let image = &self.images[self.cursor_idx];
@@ -722,10 +740,14 @@ impl ApplicationHandler for App {
                 // tracing::debug!("Delta: {delta:?}");
                 let mut need_resize = true;
                 match (self.mode, delta) {
-                    (Mode::Gallery, MouseScrollDelta::LineDelta(_, y)) if y.is_sign_positive() => {
+                    (Mode::Gallery, MouseScrollDelta::LineDelta(_, y))
+                        if y.is_sign_positive() =>
+                    {
                         self.row_offset_decrease();
                     }
-                    (Mode::Gallery, MouseScrollDelta::LineDelta(_, y)) if y.is_sign_negative() => {
+                    (Mode::Gallery, MouseScrollDelta::LineDelta(_, y))
+                        if y.is_sign_negative() =>
+                    {
                         self.row_offset_increase();
                     }
                     (Mode::SingleImage, MouseScrollDelta::LineDelta(_, y))
@@ -739,7 +761,8 @@ impl ApplicationHandler for App {
                         self.zoom_out();
                     }
                     (Mode::SingleImage, MouseScrollDelta::PixelDelta(pos)) => {
-                        let delta = pos.y as f32 / self.window_size.unwrap().height as f32;
+                        let delta = pos.y as f32
+                            / self.window_size.unwrap().height as f32;
                         self.set_scale(self.scale + delta);
                     }
                     _ => need_resize = false,

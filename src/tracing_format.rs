@@ -4,8 +4,8 @@ use tracing::Event;
 use tracing_log::NormalizeEvent;
 use tracing_subscriber::{
     fmt::{
-        format::{FormatEvent, FormatFields, Writer},
         FmtContext,
+        format::{FormatEvent, FormatFields, Writer},
     },
     registry::LookupSpan,
 };
@@ -16,9 +16,7 @@ pub struct CustomFormat {
 
 impl CustomFormat {
     pub fn new() -> Self {
-        Self {
-            dev_mode: std::env::var("DEV").is_ok(),
-        }
+        Self { dev_mode: std::env::var("DEV").is_ok() }
     }
 }
 
@@ -38,7 +36,8 @@ where
         let normalized_meta = event.normalized_metadata();
         let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
 
-        let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let timestamp =
+            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         write!(writer, "{} ", dimmed.paint(timestamp))?;
 
         let level_str = match *meta.level() {

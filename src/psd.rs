@@ -13,7 +13,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 const COLOR_MODE_GRAYSCALE: u16 = 1;
 const COLOR_MODE_RGB: u16 = 3;
@@ -50,7 +50,9 @@ pub fn decode(path: &Path, max_alloc: Option<u64>) -> Result<PsdComposite> {
 
     match (header.color_mode, header.depth) {
         (COLOR_MODE_GRAYSCALE | COLOR_MODE_RGB, 8 | 16) => {}
-        (mode, depth) => bail!("unsupported psd color mode {mode} at depth {depth}"),
+        (mode, depth) => {
+            bail!("unsupported psd color mode {mode} at depth {depth}")
+        }
     }
 
     let color_channels = match header.color_mode {
@@ -90,8 +92,8 @@ pub fn decode(path: &Path, max_alloc: Option<u64>) -> Result<PsdComposite> {
     let len = read_u32(&mut reader)?;
     skip(&mut reader, len as u64)?;
 
-    let icc =
-        scan_image_resources(&mut reader)?.filter(|_| header.color_mode == COLOR_MODE_RGB);
+    let icc = scan_image_resources(&mut reader)?
+        .filter(|_| header.color_mode == COLOR_MODE_RGB);
 
     // layer and mask info — never parsed, the composite is all we want
     let len = match header.is_psb {
@@ -129,12 +131,7 @@ pub fn decode(path: &Path, max_alloc: Option<u64>) -> Result<PsdComposite> {
         rgba[i * 4..i * 4 + 4].copy_from_slice(&[r, g, b, a]);
     }
 
-    Ok(PsdComposite {
-        width: header.width,
-        height: header.height,
-        rgba,
-        icc,
-    })
+    Ok(PsdComposite { width: header.width, height: header.height, rgba, icc })
 }
 
 fn read_header(reader: &mut impl Read) -> Result<Header> {
@@ -164,7 +161,9 @@ fn read_header(reader: &mut impl Read) -> Result<Header> {
 /// Walks the image resources section, returning the ICC profile
 /// (resource 1039) if present. Always leaves the reader at the end of the
 /// section.
-fn scan_image_resources(reader: &mut BufReader<File>) -> Result<Option<Vec<u8>>> {
+fn scan_image_resources(
+    reader: &mut BufReader<File>,
+) -> Result<Option<Vec<u8>>> {
     let section_len = read_u32(reader)? as u64;
     let section_end = reader.stream_position()? + section_len;
 
@@ -251,13 +250,18 @@ fn read_rle_planes(
 
 /// PackBits decompression of one row, appending exactly `expected` bytes
 /// to `out`
-fn unpack_bits(packed: &[u8], expected: usize, out: &mut Vec<u8>) -> Result<()> {
+fn unpack_bits(
+    packed: &[u8],
+    expected: usize,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     let start = out.len();
     let mut i = 0;
     while out.len() - start < expected {
         let control = *packed
             .get(i)
-            .ok_or_else(|| anyhow!("truncated packbits row"))? as i8;
+            .ok_or_else(|| anyhow!("truncated packbits row"))?
+            as i8;
         i += 1;
 
         match control {
@@ -321,7 +325,14 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn header(version: u16, channels: u16, w: u32, h: u32, depth: u16, mode: u16) -> Vec<u8> {
+    fn header(
+        version: u16,
+        channels: u16,
+        w: u32,
+        h: u32,
+        depth: u16,
+        mode: u16,
+    ) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"8BPS");
         buf.extend_from_slice(&version.to_be_bytes());
@@ -335,7 +346,8 @@ mod tests {
     }
 
     fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!("swiv-psd-test-{name}-{}", std::process::id()));
+        let path = std::env::temp_dir()
+            .join(format!("swiv-psd-test-{name}-{}", std::process::id()));
         File::create(&path).unwrap().write_all(bytes).unwrap();
         path
     }

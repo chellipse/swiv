@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::lazy::{GenericImage, ImageRequest, RenderableImage};
 
@@ -29,7 +29,11 @@ impl LoadClass {
     /// decodes and textures
     fn canonicalize(self, native: Option<(u32, u32)>) -> Self {
         match (self, native) {
-            (Self::Thumb(bucket), Some((w, h))) if w <= bucket && h <= bucket => Self::Full,
+            (Self::Thumb(bucket), Some((w, h)))
+                if w <= bucket && h <= bucket =>
+            {
+                Self::Full
+            }
             _ => self,
         }
     }
@@ -126,7 +130,11 @@ impl ImageCache {
     /// immediately after an upload, so a renderable with an uninitialized
     /// vertex buffer (which would skip its draw and flicker for a frame) can
     /// never reach a render pass.
-    pub fn get_resident(&mut self, path: &Path, class: LoadClass) -> Option<&mut RenderableImage> {
+    pub fn get_resident(
+        &mut self,
+        path: &Path,
+        class: LoadClass,
+    ) -> Option<&mut RenderableImage> {
         let entry = self.entries.get_mut(path)?;
         let class = class.canonicalize(entry.native);
         let best = Self::best_resident(&entry.classes, class)?;
@@ -158,14 +166,13 @@ impl ImageCache {
             // header-only read, cheap enough for the ui thread; a failed
             // probe is not fatal (the decode is authoritative for errors)
             let native = GenericImage::probe_dimensions(path)
-                .inspect_err(|e| tracing::debug!("Probe failed: {e:?} from {path:?}"))
+                .inspect_err(|e| {
+                    tracing::debug!("Probe failed: {e:?} from {path:?}")
+                })
                 .ok();
             self.entries.insert(
                 path.to_path_buf(),
-                PathEntry {
-                    native,
-                    ..Default::default()
-                },
+                PathEntry { native, ..Default::default() },
             );
         }
         let path_entry = self.entries.get_mut(path).unwrap();
@@ -232,7 +239,8 @@ impl ImageCache {
             .values()
             .filter(|entry| {
                 entry.classes.get(&LoadClass::Full).is_some_and(|full| {
-                    full.gpu.is_some() && full.gpu_bytes > Self::LARGE_FULL_BYTES
+                    full.gpu.is_some()
+                        && full.gpu_bytes > Self::LARGE_FULL_BYTES
                 })
             })
             .count();
@@ -251,8 +259,12 @@ impl ImageCache {
                 path_entry
                     .classes
                     .iter()
-                    .filter(|(_, entry)| entry.gpu.is_some() && entry.last_used < self.frame)
-                    .map(|(class, entry)| (path.clone(), *class, entry.last_used, entry.gpu_bytes))
+                    .filter(|(_, entry)| {
+                        entry.gpu.is_some() && entry.last_used < self.frame
+                    })
+                    .map(|(class, entry)| {
+                        (path.clone(), *class, entry.last_used, entry.gpu_bytes)
+                    })
             })
             .collect();
         candidates.sort_by_key(|(_, _, last_used, _)| *last_used);
@@ -260,9 +272,11 @@ impl ImageCache {
         let mut evicted = false;
 
         let mut large_fulls = resident_large_fulls;
-        for (path, class, _, _) in candidates.iter().filter(|(_, class, _, gpu_bytes)| {
-            *class == LoadClass::Full && *gpu_bytes > Self::LARGE_FULL_BYTES
-        }) {
+        for (path, class, _, _) in
+            candidates.iter().filter(|(_, class, _, gpu_bytes)| {
+                *class == LoadClass::Full && *gpu_bytes > Self::LARGE_FULL_BYTES
+            })
+        {
             if large_fulls <= Self::MAX_RESIDENT_FULL {
                 break;
             }

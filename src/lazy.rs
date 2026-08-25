@@ -5,20 +5,21 @@ use std::{
     ops::{Div, Rem},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread::{self, JoinHandle},
 };
 
-use anyhow::{anyhow, bail, ensure, Result};
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use anyhow::{Result, anyhow, bail, ensure};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use image::{
-    metadata::Orientation, DynamicImage, EncodableLayout, ImageDecoder, ImageReader, RgbaImage,
+    DynamicImage, EncodableLayout, ImageDecoder, ImageReader, RgbaImage,
+    metadata::Orientation,
 };
 use wgpu::{
-    util::DeviceExt, BindGroup, BindGroupLayout, Buffer, Device, Queue, RenderPass, Sampler,
-    TextureFormat, TextureUsages,
+    BindGroup, BindGroupLayout, Buffer, Device, Queue, RenderPass, Sampler,
+    TextureFormat, TextureUsages, util::DeviceExt,
 };
 
 use crate::{cache::LoadClass, disk_cache::ThumbDiskCache, raw::RawMode};
@@ -33,10 +34,7 @@ pub struct LazyImage {
 
 impl LazyImage {
     pub fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            grid_pos: Cell::new(0),
-        }
+        Self { path, grid_pos: Cell::new(0) }
     }
 
     pub fn set_pos(&self, val: usize) {
@@ -82,11 +80,7 @@ impl ImageRequest {
         path: PathBuf,
         class: LoadClass,
     ) -> Self {
-        Self {
-            response_channel,
-            path,
-            class,
-        }
+        Self { response_channel, path, class }
     }
 
     /// Returns whether the result was an error
@@ -152,25 +146,23 @@ impl ImageLoaderService {
             let completion_sender = completion_sender.clone();
             let ctx = ctx.clone();
 
-            let handle = thread::spawn(move || loop {
-                match receiver.recv() {
-                    Ok(req) => {
-                        let path = req.path.clone();
-                        tracing::trace!("Request on {id}:{:?}", path);
-                        let was_err = req.eval(&ctx);
-                        let _ = completion_sender.send((path, was_err));
-                    }
-                    Err(_) => break,
-                };
+            let handle = thread::spawn(move || {
+                loop {
+                    match receiver.recv() {
+                        Ok(req) => {
+                            let path = req.path.clone();
+                            tracing::trace!("Request on {id}:{:?}", path);
+                            let was_err = req.eval(&ctx);
+                            let _ = completion_sender.send((path, was_err));
+                        }
+                        Err(_) => break,
+                    };
+                }
             });
             handles.push(handle);
         }
 
-        Self {
-            sender,
-            completion_receiver,
-            handles,
-        }
+        Self { sender, completion_receiver, handles }
     }
 
     pub fn clone_sender(&self) -> Sender<ImageRequest> {
@@ -197,9 +189,9 @@ pub struct GenericImage {
 
 impl GenericImage {
     fn is_psd(path: &Path) -> bool {
-        path.extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("psd") || e.eq_ignore_ascii_case("psb"))
+        path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            e.eq_ignore_ascii_case("psd") || e.eq_ignore_ascii_case("psb")
+        })
     }
 
     /// Header-only read of the native dimensions; no pixel decode
@@ -225,7 +217,11 @@ impl GenericImage {
 
     /// Decode entry point, validating the result before it can reach a
     /// texture upload
-    pub fn decode(path: impl AsRef<Path>, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
+    pub fn decode(
+        path: impl AsRef<Path>,
+        class: LoadClass,
+        ctx: &DecodeContext,
+    ) -> Result<Self> {
         let this = Self::decode_cached(path.as_ref(), class, ctx)?;
         // wgpu panics on zero-dimension textures; real files decode to this
         // (gifs with a 0x0 logical screen descriptor). validated here rather
@@ -240,8 +236,14 @@ impl GenericImage {
     }
 
     /// Wraps the backends with the thumbnail disk cache
-    fn decode_cached(path: &Path, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
-        let (LoadClass::Thumb(bucket), Some(cache)) = (class, ctx.disk_cache.as_ref()) else {
+    fn decode_cached(
+        path: &Path,
+        class: LoadClass,
+        ctx: &DecodeContext,
+    ) -> Result<Self> {
+        let (LoadClass::Thumb(bucket), Some(cache)) =
+            (class, ctx.disk_cache.as_ref())
+        else {
             return Self::decode_backend(path, class, ctx);
         };
 
@@ -255,7 +257,9 @@ impl GenericImage {
         // these sizes is negligible
         if let Some(larger) = cache.load_larger(path, bucket) {
             tracing::trace!("Thumb cache promotion: {path:?} @{bucket}");
-            let this = Self::from_dynamic_srgb(Self::downscale_to_bucket(larger, bucket));
+            let this = Self::from_dynamic_srgb(Self::downscale_to_bucket(
+                larger, bucket,
+            ));
             cache.store(path, bucket, this.width, this.height, &this.bytes);
             return Ok(this);
         }
@@ -270,7 +274,11 @@ impl GenericImage {
 
     /// Format dispatch across decode backends (camera raws via rawler will
     /// slot in here too)
-    fn decode_backend(path: &Path, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
+    fn decode_backend(
+        path: &Path,
+        class: LoadClass,
+        ctx: &DecodeContext,
+    ) -> Result<Self> {
         // decoding materializes the native-size image no matter the class,
         // so serialize the giant ones: concurrent workers would otherwise
         // multiply a multi-GB buffer by the pool size
@@ -289,12 +297,20 @@ impl GenericImage {
         }
     }
 
-    fn decode_psd(path: &Path, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
+    fn decode_psd(
+        path: &Path,
+        class: LoadClass,
+        ctx: &DecodeContext,
+    ) -> Result<Self> {
         tracing::trace!("Loading {path:?} as {class:?} via psd backend");
 
         let composite = crate::psd::decode(path, ctx.max_alloc)?;
-        let img = RgbaImage::from_raw(composite.width, composite.height, composite.rgba)
-            .ok_or_else(|| anyhow!("psd composite buffer size mismatch"))?;
+        let img = RgbaImage::from_raw(
+            composite.width,
+            composite.height,
+            composite.rgba,
+        )
+        .ok_or_else(|| anyhow!("psd composite buffer size mismatch"))?;
 
         Self::finish_decode(
             DynamicImage::ImageRgba8(img),
@@ -306,14 +322,22 @@ impl GenericImage {
         )
     }
 
-    fn decode_raw(path: &Path, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
+    fn decode_raw(
+        path: &Path,
+        class: LoadClass,
+        ctx: &DecodeContext,
+    ) -> Result<Self> {
         tracing::trace!("Loading {path:?} as {class:?} via raw backend");
 
         let preview = match (class, ctx.raw_mode) {
             // thumbs always come from embedded previews: developing sensor
             // data for a gallery cell would be absurd
-            (LoadClass::Thumb(bucket), _) => crate::raw::decode_preview(path, Some(bucket))?,
-            (LoadClass::Full, RawMode::Preview) => crate::raw::decode_preview(path, None)?,
+            (LoadClass::Thumb(bucket), _) => {
+                crate::raw::decode_preview(path, Some(bucket))?
+            }
+            (LoadClass::Full, RawMode::Preview) => {
+                crate::raw::decode_preview(path, None)?
+            }
             (LoadClass::Full, RawMode::Develop) => {
                 // develop buffers are always big enough to count as huge
                 // (the extension-based probe skip bypasses the usual check)
@@ -361,7 +385,11 @@ impl GenericImage {
         img.resize(bucket, bucket, image::imageops::FilterType::Lanczos3)
     }
 
-    fn decode_image_rs(path: impl AsRef<Path>, class: LoadClass, ctx: &DecodeContext) -> Result<Self> {
+    fn decode_image_rs(
+        path: impl AsRef<Path>,
+        class: LoadClass,
+        ctx: &DecodeContext,
+    ) -> Result<Self> {
         tracing::trace!("Loading {:?} as {class:?}", path.as_ref());
 
         let file = File::open(&path)?;
@@ -379,7 +407,14 @@ impl GenericImage {
         let icc_profile = decoder.icc_profile()?;
         let img = DynamicImage::from_decoder(decoder)?;
 
-        Self::finish_decode(img, icc_profile, orientation, class, path.as_ref(), ctx)
+        Self::finish_decode(
+            img,
+            icc_profile,
+            orientation,
+            class,
+            path.as_ref(),
+            ctx,
+        )
     }
 
     /// Shared tail of every decode backend: class-dependent sizing, EXIF
@@ -439,13 +474,7 @@ impl GenericImage {
         }
 
         tracing::trace!("Finished: {path:?}");
-        Ok(Self {
-            width,
-            height,
-            bytes,
-            format,
-            pixel_width,
-        })
+        Ok(Self { width, height, bytes, format, pixel_width })
     }
 }
 
@@ -461,60 +490,70 @@ pub struct MipGenerator {
 
 impl MipGenerator {
     pub fn new(device: &Device, format: TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Mip blit shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
-        });
+        let shader =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Mip blit shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("blit.wgsl").into(),
+                ),
+            });
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Mip blit bind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Mip blit bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float {
+                                filterable: true,
+                            },
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(
+                            wgpu::SamplerBindingType::Filtering,
+                        ),
+                        count: None,
+                    },
+                ],
+            });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Mip blit pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
+        let pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Mip blit pipeline layout"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
+            });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Mip blit pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(format.into())],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Mip blit pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(format.into())],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -524,14 +563,15 @@ impl MipGenerator {
             ..Default::default()
         });
 
-        Self {
-            pipeline,
-            bind_group_layout,
-            sampler,
-        }
+        Self { pipeline, bind_group_layout, sampler }
     }
 
-    fn generate(&self, device: &Device, queue: &Queue, texture: &wgpu::Texture) {
+    fn generate(
+        &self,
+        device: &Device,
+        queue: &Queue,
+        texture: &wgpu::Texture,
+    ) {
         let mut encoder = device.create_command_encoder(&Default::default());
 
         let views: Vec<_> = (0..texture.mip_level_count())
@@ -545,37 +585,45 @@ impl MipGenerator {
             .collect();
 
         for level in 1..views.len() {
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Mip blit bind group"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&views[level - 1]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-            });
+            let bind_group =
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Mip blit bind group"),
+                    layout: &self.bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(
+                                &views[level - 1],
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(
+                                &self.sampler,
+                            ),
+                        },
+                    ],
+                });
 
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Mip blit pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &views[level],
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let mut pass =
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Mip blit pass"),
+                    color_attachments: &[Some(
+                        wgpu::RenderPassColorAttachment {
+                            view: &views[level],
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        },
+                    )],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.draw(0..3, 0..1);
@@ -638,7 +686,8 @@ impl RenderableImage {
             view_formats: &[],
         });
 
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let texture_view =
+            texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Create bind group that associates the texture with the shader
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -741,7 +790,9 @@ impl LazyVertexBuffer {
     }
 
     pub fn get(&mut self) -> Option<&Buffer> {
-        if let Some(vertices) = std::mem::replace(&mut self.waiting_to_resize, None) {
+        if let Some(vertices) =
+            std::mem::replace(&mut self.waiting_to_resize, None)
+        {
             self.resize(vertices);
             // NOTE: if we don't return here than it can cause an invalid state
             // since between the read of self.mapped in self.resize and the read
@@ -766,7 +817,8 @@ impl LazyVertexBuffer {
                 &wgpu::util::BufferInitDescriptor {
                     label: Some("RenderableImage vertex buffer"),
                     contents: bytemuck::cast_slice(&vertices.finish()),
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::MAP_WRITE,
+                    usage: wgpu::BufferUsages::VERTEX
+                        | wgpu::BufferUsages::MAP_WRITE,
                 },
             ));
             return;
@@ -789,7 +841,9 @@ impl LazyVertexBuffer {
                     Ok(mut view) => {
                         // BufferViewMut is write-only in wgpu 30 (mapped
                         // memory may be write-combining)
-                        view.copy_from_slice(bytemuck::cast_slice(&vertices.finish()));
+                        view.copy_from_slice(bytemuck::cast_slice(
+                            &vertices.finish(),
+                        ));
                         drop(view);
                         capturable.unmap();
                         is_mapped.store(false, Ordering::Release);

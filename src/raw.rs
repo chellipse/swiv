@@ -11,10 +11,10 @@ use std::{
     path::Path,
 };
 
-use anyhow::{anyhow, Result};
-use image::{metadata::Orientation, DynamicImage};
+use anyhow::{Result, anyhow};
+use image::{DynamicImage, metadata::Orientation};
 use rawler::{
-    decoders::{supported_extensions, Decoder, RawDecodeParams},
+    decoders::{Decoder, RawDecodeParams, supported_extensions},
     get_decoder,
     imgop::develop::RawDevelop,
     rawsource::RawSource,
@@ -30,11 +30,13 @@ pub enum RawMode {
 }
 
 pub fn is_raw(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|ext| {
-        supported_extensions()
-            .iter()
-            .any(|supported| supported.eq_ignore_ascii_case(ext))
-    })
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            supported_extensions()
+                .iter()
+                .any(|supported| supported.eq_ignore_ascii_case(ext))
+        })
 }
 
 pub struct Preview {
@@ -72,22 +74,22 @@ pub fn decode_preview(path: &Path, min_edge: Option<u32>) -> Result<Preview> {
                     .flatten()
                     .filter(&covers)
             })
-            .or_else(|| largest_embedded(decoder.as_ref(), &source, &params, path)),
+            .or_else(|| {
+                largest_embedded(decoder.as_ref(), &source, &params, path)
+            }),
         None => largest_embedded(decoder.as_ref(), &source, &params, path),
     }
     // nothing covering the wanted size: any preview at all beats nothing,
     // the decoder never upscales
     .or_else(|| decoder.preview_image(&source, &params).ok().flatten())
     .or_else(|| decoder.thumbnail_image(&source, &params).ok().flatten())
-    .ok_or_else(|| anyhow!("no embedded preview found (raw develop is not supported)"))?;
+    .ok_or_else(|| {
+        anyhow!("no embedded preview found (raw develop is not supported)")
+    })?;
 
     let (icc, orientation) = exif_extras(decoder.as_ref(), &source, &params);
 
-    Ok(Preview {
-        image,
-        icc,
-        orientation,
-    })
+    Ok(Preview { image, icc, orientation })
 }
 
 /// Demosaics and develops the actual sensor data to an sRGB image.
@@ -127,18 +129,23 @@ fn largest_embedded(
     let from_rawler = decoder.full_image(source, params).ok().flatten();
 
     let from_scan = largest_tiff_jpeg(path)
-        .inspect_err(|e| tracing::debug!("TIFF preview scan failed for {path:?}: {e:?}"))
+        .inspect_err(|e| {
+            tracing::debug!("TIFF preview scan failed for {path:?}: {e:?}")
+        })
         .ok()
         .flatten()
         .and_then(|blob| {
-            image::load_from_memory_with_format(&blob, image::ImageFormat::Jpeg).ok()
+            image::load_from_memory_with_format(&blob, image::ImageFormat::Jpeg)
+                .ok()
         });
 
     match (from_rawler, from_scan) {
-        (Some(a), Some(b)) => Some(match b.width() * b.height() > a.width() * a.height() {
-            true => b,
-            false => a,
-        }),
+        (Some(a), Some(b)) => {
+            Some(match b.width() * b.height() > a.width() * a.height() {
+                true => b,
+                false => a,
+            })
+        }
         (a, b) => a.or(b),
     }
 }
@@ -270,7 +277,9 @@ fn exif_extras(
     // EXIF ColorSpace: 1 (or absent) = sRGB, 2 = Adobe RGB
     let icc = match meta.as_ref().and_then(|m| m.exif.color_space) {
         Some(2) => adobe_rgb_icc()
-            .inspect_err(|e| tracing::warn!("Failed to build the AdobeRGB profile: {e:?}"))
+            .inspect_err(|e| {
+                tracing::warn!("Failed to build the AdobeRGB profile: {e:?}")
+            })
             .ok(),
         _ => None,
     };
@@ -281,29 +290,14 @@ fn exif_extras(
 /// Adobe RGB (1998), serialized so it can flow through the same ICC path
 /// every other embedded profile takes
 fn adobe_rgb_icc() -> Result<Vec<u8>> {
-    let d65 = lcms2::CIExyY {
-        x: 0.3127,
-        y: 0.3290,
-        Y: 1.0,
-    };
+    let d65 = lcms2::CIExyY { x: 0.3127, y: 0.3290, Y: 1.0 };
     let primaries = lcms2::CIExyYTRIPLE {
-        Red: lcms2::CIExyY {
-            x: 0.6400,
-            y: 0.3300,
-            Y: 1.0,
-        },
-        Green: lcms2::CIExyY {
-            x: 0.2100,
-            y: 0.7100,
-            Y: 1.0,
-        },
-        Blue: lcms2::CIExyY {
-            x: 0.1500,
-            y: 0.0600,
-            Y: 1.0,
-        },
+        Red: lcms2::CIExyY { x: 0.6400, y: 0.3300, Y: 1.0 },
+        Green: lcms2::CIExyY { x: 0.2100, y: 0.7100, Y: 1.0 },
+        Blue: lcms2::CIExyY { x: 0.1500, y: 0.0600, Y: 1.0 },
     };
     let gamma = lcms2::ToneCurve::new(563.0 / 256.0);
-    let profile = lcms2::Profile::new_rgb(&d65, &primaries, &[&gamma, &gamma, &gamma])?;
+    let profile =
+        lcms2::Profile::new_rgb(&d65, &primaries, &[&gamma, &gamma, &gamma])?;
     Ok(profile.icc()?)
 }
