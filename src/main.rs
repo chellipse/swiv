@@ -1,10 +1,12 @@
 use std::{
+    cmp::Reverse,
     fmt::Debug,
     fs::{self, DirEntry},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use itertools::Itertools;
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -15,6 +17,23 @@ use swiv::{app::App, raw::RawMode, tracing_format::CustomFormat};
 pub enum Mode {
     Gallery,
     SingleImage,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum SortOrder {
+    /// Sort by modification time, newest first
+    #[default]
+    Mtime,
+    /// Sort by status change time (Unix) or creation time (Windows), newest first
+    Ctime,
+    /// Sort by access time, newest first
+    Atime,
+    /// Sort by creation/birth time, newest first (filesystem-dependent)
+    Btime,
+    /// Sort lexically by filename (natural sort)
+    Name,
+    /// No sorting, filesystem order
+    None,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -29,9 +48,9 @@ struct Cli {
     #[arg(long, default_value_t = 16)]
     recursion_limit: u8,
 
-    /// Do not perform a lexical sort over all paths
-    #[arg(long)]
-    no_sort: bool,
+    /// Sort order for files
+    #[arg(long, value_enum, default_value_t = SortOrder::default())]
+    sort_by: SortOrder,
 
     /// Ignore file extension during path filtering
     #[arg(long)]
@@ -65,7 +84,8 @@ struct Cli {
 
 impl Cli {
     fn get_paths(&self) -> Result<(Vec<PathBuf>, Option<usize>)> {
-        let recursion = self.recursive.then_some(self.recursion_limit).unwrap_or(0);
+        let recursion =
+            self.recursive.then_some(self.recursion_limit).unwrap_or(0);
 
         let (target, cursor_entry) = match self.target.metadata()?.is_dir() {
             true => (self.target.clone(), None),
@@ -75,20 +95,25 @@ impl Cli {
             ),
         };
 
-        let mut iter: Box<dyn Iterator<Item = _>> =
-            Box::new(Self::open_dir(&target, recursion, self.no_ignore)?.map(|entry| entry.path()));
+        let mut iter: Box<dyn Iterator<Item = _>> = Box::new(
+            Self::open_dir(&target, recursion, self.no_ignore)?
+                .map(|entry| entry.path()),
+        );
 
         if self.ignore_ext {
+            #[rustfmt::skip]
             const EXTENSIONS: &[&str] = &[
                 // formats image-rs supports
-                "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif", "tga", "dds",
-                "farbfeld", "ff", "pnm", "pbm", "pgm", "pam", "ppm", "hdr", "exr", "qoi", "avif",
+                "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff",
+                "tif", "tga", "dds", "farbfeld", "ff", "pnm", "pbm", "pgm",
+                "pam", "ppm", "hdr", "exr", "qoi", "avif",
                 // via the psd backend
                 "psd", "psb",
                 // camera raws via the rawler backend
-                "ari", "arw", "cr2", "cr3", "crm", "crw", "dcr", "dcs", "dng", "erf", "iiq",
-                "kdc", "mef", "mos", "mrw", "nef", "nrw", "orf", "ori", "pef", "raf", "raw",
-                "rw2", "rwl", "srw", "3fr", "fff", "x3f", "qtk",
+                "ari", "arw", "cr2", "cr3", "crm", "crw", "dcr", "dcs", "dng",
+                "erf", "iiq", "kdc", "mef", "mos", "mrw", "nef", "nrw", "orf",
+                "ori", "pef", "raf", "raw", "rw2", "rwl", "srw", "3fr", "fff",
+                "x3f", "qtk",
             ];
             iter = Box::new(iter.filter(|path| {
                 path.extension()
@@ -99,10 +124,42 @@ impl Cli {
             }));
         };
 
-        if !self.no_sort {
-            iter = Box::new(iter.sorted_by(|a, b| {
-                lexical_sort::natural_lexical_cmp(&a.to_string_lossy(), &b.to_string_lossy())
-            }));
+        iter = match self.sort_by {
+            SortOrder::None => iter,
+            SortOrder::Name => Box::new(iter.sorted_by(|a, b| {
+                lexical_sort::natural_lexical_cmp(
+                    &a.to_string_lossy(),
+                    &b.to_string_lossy(),
+                )
+            })),
+            time_sort => {
+                let get_time = move |path: &PathBuf| -> Option<SystemTime> {
+                    let meta = std::fs::metadata(path).ok()?;
+                    match time_sort {
+                        SortOrder::Mtime => meta.modified().ok(),
+                        SortOrder::Atime => meta.accessed().ok(),
+                        SortOrder::Ctime => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::MetadataExt;
+                                Some(
+                                    SystemTime::UNIX_EPOCH
+                                        + std::time::Duration::from_secs(
+                                            meta.ctime() as u64,
+                                        ),
+                                )
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                meta.created().ok()
+                            }
+                        }
+                        SortOrder::Btime => meta.created().ok(),
+                        _ => unreachable!(),
+                    }
+                };
+                Box::new(iter.sorted_by_key(|path| Reverse(get_time(path))))
+            }
         };
 
         let paths: Vec<_> = iter.collect();
@@ -137,7 +194,9 @@ impl Cli {
                         meta.file_type(),
                         recursion,
                         path.file_name()
-                            .and_then(|x| x.as_encoded_bytes().get(0).map(|n| n == &b'.'))
+                            .and_then(|x| {
+                                x.as_encoded_bytes().get(0).map(|n| n == &b'.')
+                            })
                             .unwrap_or(false)
                             <= no_ignore,
                     ) {
@@ -147,7 +206,12 @@ impl Cli {
                             Some(iter)
                         }
                         (ft, r, true) if ft.is_dir() && r > 0 => {
-                            Self::open_dir(path, recursion.saturating_sub(1), no_ignore).ok()
+                            Self::open_dir(
+                                path,
+                                recursion.saturating_sub(1),
+                                no_ignore,
+                            )
+                            .ok()
                         }
                         // TODO make this traverse a set number of symlinks
                         _ => None,
@@ -172,7 +236,9 @@ fn spawn_mem_logger(path: PathBuf) {
         let mut file = match std::fs::File::create(&path) {
             Ok(file) => file,
             Err(e) => {
-                tracing::error!("Failed to create mem usage csv at {path:?}: {e}");
+                tracing::error!(
+                    "Failed to create mem usage csv at {path:?}: {e}"
+                );
                 return;
             }
         };
@@ -216,7 +282,9 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("error")
+                }),
         )
         .with_writer(stdout)
         .event_format(CustomFormat::new())
@@ -240,9 +308,17 @@ fn main() {
         }
     };
 
-    let max_decode_alloc = (cli.max_decode_mem > 0).then(|| cli.max_decode_mem * 1024 * 1024);
-    let gpu_budget = (cli.max_gpu_mem > 0).then(|| cli.max_gpu_mem * 1024 * 1024);
-    let mut app = App::new(paths, cursor_idx, max_decode_alloc, gpu_budget, cli.raw_mode);
+    let max_decode_alloc =
+        (cli.max_decode_mem > 0).then(|| cli.max_decode_mem * 1024 * 1024);
+    let gpu_budget =
+        (cli.max_gpu_mem > 0).then(|| cli.max_gpu_mem * 1024 * 1024);
+    let mut app = App::new(
+        paths,
+        cursor_idx,
+        max_decode_alloc,
+        gpu_budget,
+        cli.raw_mode,
+    );
     event_loop.run_app(&mut app).unwrap();
 }
 
