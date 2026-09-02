@@ -161,6 +161,9 @@ pub struct App {
     col_no: u32,
     /// - must be dragged by [`Self::cursor_idx`]
     row_offset: usize,
+    /// pixel-delta scroll residue not yet worth a full row; drained into
+    /// [`Self::row_offset`] one row height at a time
+    scroll_accum_px: f64,
 
     // single image mode state
     drag_start_pos: Option<Point2>,
@@ -245,6 +248,7 @@ impl App {
             drag_total: Point2::new(0.0, 0.0),
             cursor_idx,
             row_offset: 0,
+            scroll_accum_px: 0.0,
             exiting,
             exit_msg: None,
             sys,
@@ -269,6 +273,7 @@ impl App {
 
     pub fn toggle_mode(&mut self) {
         self.mode.toggle();
+        self.scroll_accum_px = 0.0;
     }
 
     pub fn row_no_reset(&mut self) {
@@ -740,32 +745,53 @@ impl ApplicationHandler for App {
                 // tracing::debug!("Delta: {delta:?}");
                 let mut need_resize = true;
                 match (self.mode, delta) {
-                    (Mode::Gallery, MouseScrollDelta::LineDelta(_, y))
-                        if y.is_sign_positive() =>
-                    {
-                        self.row_offset_decrease();
+                    (Mode::Gallery, MouseScrollDelta::LineDelta(_, y)) => {
+                        // discrete wheel and pixel scrolling may coexist
+                        // (mouse + touchpad); wheel clicks void the residue
+                        self.scroll_accum_px = 0.0;
+                        if y.is_sign_positive() {
+                            self.row_offset_decrease();
+                        } else if y.is_sign_negative() {
+                            self.row_offset_increase();
+                        } else {
+                            need_resize = false;
+                        }
                     }
-                    (Mode::Gallery, MouseScrollDelta::LineDelta(_, y))
-                        if y.is_sign_negative() =>
-                    {
-                        self.row_offset_increase();
+                    (Mode::SingleImage, MouseScrollDelta::LineDelta(_, y)) => {
+                        if y.is_sign_positive() {
+                            self.zoom_in();
+                        } else if y.is_sign_negative() {
+                            self.zoom_out();
+                        } else {
+                            need_resize = false;
+                        }
                     }
-                    (Mode::SingleImage, MouseScrollDelta::LineDelta(_, y))
-                        if y.is_sign_positive() =>
-                    {
-                        self.zoom_in();
-                    }
-                    (Mode::SingleImage, MouseScrollDelta::LineDelta(_, y))
-                        if y.is_sign_negative() =>
-                    {
-                        self.zoom_out();
+                    (Mode::Gallery, MouseScrollDelta::PixelDelta(pos)) => {
+                        self.scroll_accum_px += pos.y;
+                        let row_h = self.window_size.unwrap().height as f64
+                            / self.row_no as f64;
+
+                        // a single coalesced event can be worth several
+                        // rows; at the ends the offset setters clamp while
+                        // the residue keeps draining, so overshoot never
+                        // accumulates into rubber-banding
+                        let before = self.row_offset;
+                        while self.scroll_accum_px >= row_h {
+                            self.row_offset_decrease();
+                            self.scroll_accum_px -= row_h;
+                        }
+                        while self.scroll_accum_px <= -row_h {
+                            self.row_offset_increase();
+                            self.scroll_accum_px += row_h;
+                        }
+                        need_resize = self.row_offset != before;
                     }
                     (Mode::SingleImage, MouseScrollDelta::PixelDelta(pos)) => {
                         let delta = pos.y as f32
                             / self.window_size.unwrap().height as f32;
+                        // tracing::debug!("PDelta: {delta:?}");
                         self.set_scale(self.scale + delta);
                     }
-                    _ => need_resize = false,
                 }
 
                 if need_resize {
