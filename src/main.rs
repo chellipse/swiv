@@ -76,10 +76,11 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     max_gpu_mem: u64,
 
-    /// How camera raws are rendered in single image mode (thumbnails
-    /// always use the embedded previews)
-    #[arg(long, value_enum, default_value_t = RawMode::Preview)]
-    raw_mode: RawMode,
+    /// Demosaic + develop the actual sensor data when viewing camera raws
+    /// in single image mode, instead of showing the camera's embedded
+    /// preview jpeg (thumbnails always use the embedded previews)
+    #[arg(long)]
+    raw_mode: bool,
 }
 
 impl Cli {
@@ -312,13 +313,12 @@ fn main() {
         (cli.max_decode_mem > 0).then(|| cli.max_decode_mem * 1024 * 1024);
     let gpu_budget =
         (cli.max_gpu_mem > 0).then(|| cli.max_gpu_mem * 1024 * 1024);
-    let mut app = App::new(
-        paths,
-        cursor_idx,
-        max_decode_alloc,
-        gpu_budget,
-        cli.raw_mode,
-    );
+    let raw_mode = match cli.raw_mode {
+        true => RawMode::Develop,
+        false => RawMode::Preview,
+    };
+    let mut app =
+        App::new(paths, cursor_idx, max_decode_alloc, gpu_budget, raw_mode);
     event_loop.run_app(&mut app).unwrap();
 }
 

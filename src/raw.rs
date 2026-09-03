@@ -21,7 +21,7 @@ use rawler::{
 };
 
 /// How Full-resolution raws are rendered
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawMode {
     /// Demosaic + develop the actual sensor data (slow, neutral rendering)
     Develop,
