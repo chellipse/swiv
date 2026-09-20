@@ -291,7 +291,7 @@ fn spawn_mem_logger(path: PathBuf) {
 }
 
 fn main() {
-    let (stdout, _guard) = tracing_appender::non_blocking(std::io::stdout());
+    let (stdout, guard) = tracing_appender::non_blocking(std::io::stdout());
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -318,6 +318,9 @@ fn main() {
         Ok(x) => x,
         Err(e) => {
             tracing::error!("{e} from {:?}", cli.target);
+            // Drop the guard to flush queued log messages before exiting;
+            // process::exit skips destructors.
+            drop(guard);
             std::process::exit(1);
         }
     };
