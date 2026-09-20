@@ -90,10 +90,23 @@ impl Cli {
 
         let (target, cursor_entry) = match self.target.metadata()?.is_dir() {
             true => (self.target.clone(), None),
-            false => (
-                self.target.parent().ok_or(anyhow!("None"))?.to_path_buf(),
-                Some(self.target.clone()),
-            ),
+            false => {
+                // parent() of a bare filename ("foo.jpg") is Some(""),
+                // which read_dir rejects — map it to "."
+                let parent = match self.target.parent() {
+                    Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+                    _ => PathBuf::from("."),
+                };
+                // rebuilt as parent/name so it compares equal to open_dir
+                // output however the target was spelled ("foo.jpg" alone
+                // would never match the "./foo.jpg" the walk yields)
+                let name = self
+                    .target
+                    .file_name()
+                    .ok_or(anyhow!("no file name in {:?}", self.target))?;
+                let entry = parent.join(name);
+                (parent, Some(entry))
+            }
         };
 
         let mut iter: Box<dyn Iterator<Item = _>> = Box::new(
