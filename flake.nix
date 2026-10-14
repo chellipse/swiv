@@ -29,19 +29,11 @@
         rustc = rust;
       };
 
-      inputs = with pkgs; [
-        wayland
-        libxkbcommon
-        vulkan-headers
-        vulkan-loader
-        # vulkan-tools
-        # vulkan-tools-lunarg
-        # vulkan-extension-layer
-        # vulkan-validation-layers
-        dav1d
-      ];
+      # Use this flake's pins and toolchain with the shared package recipe.
+      mkSwiv = targetCpu: pkgs.callPackage ./package.nix { inherit rustPlatform targetCpu; };
+      swiv = mkSwiv null;
 
-      libPath = pkgs.lib.makeLibraryPath inputs;
+      libPath = pkgs.lib.makeLibraryPath swiv.libs;
 
       # for the uv scripts in scripts/
       pythonEnv = pkgs.python3.withPackages (
@@ -49,39 +41,10 @@
           uv
         ]
       );
-
-      mkSwiv =
-        targetCpu:
-        rustPlatform.buildRustPackage rec {
-          pname = "swiv";
-          version = "0.1.0";
-
-          src = pkgs.lib.cleanSourceWith {
-            src = ./.;
-            filter =
-              path: type:
-              (pkgs.lib.hasSuffix ".wgsl" path)
-              || (pkgs.lib.cleanSourceFilter path type)
-              || (builtins.match ".*/(Cargo\\.toml|Cargo\\.lock|src/.*)" path != null);
-          };
-
-          cargoLock.lockFile = ./Cargo.lock;
-
-          buildInputs = inputs;
-
-          nativeBuildInputs = [ pkgs.pkg-config ];
-
-          RUSTFLAGS = pkgs.lib.optionalString (targetCpu != null) "-C target-cpu=${targetCpu}";
-
-          postFixup = ''
-            patchelf --set-rpath ${libPath} $out/bin/${pname}
-          '';
-        };
-
     in
     {
       packages.${system} = {
-        default = mkSwiv null;
+        default = swiv;
         native = mkSwiv "native";
         x86-64-v3 = mkSwiv "x86-64-v3";
       };
@@ -93,7 +56,12 @@
           pythonEnv
         ];
 
-        buildInputs = inputs;
+        buildInputs = swiv.libs ++ [
+          # pkgs.vulkan-tools
+          # pkgs.vulkan-tools-lunarg
+          # pkgs.vulkan-extension-layer
+          # pkgs.vulkan-validation-layers
+        ];
 
         # wanted to avoid setting RUSTFLAGS for this but using LD_LIBRARY_PATH
         # makes checking whether builds work possibly confusing
