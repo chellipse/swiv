@@ -1,6 +1,8 @@
 pub mod app;
+pub mod bar;
 pub mod cache;
 pub mod disk_cache;
+pub mod font;
 pub mod keymap;
 pub mod lazy;
 pub mod psd;

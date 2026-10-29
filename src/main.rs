@@ -11,7 +11,7 @@ use clap::Parser;
 use itertools::Itertools;
 use winit::event_loop::{ControlFlow, EventLoop};
 
-use swiv::{app::App, raw::RawMode, tracing_format::CustomFormat};
+use swiv::{app::App, font, raw::RawMode, tracing_format::CustomFormat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -81,6 +81,11 @@ struct Cli {
     /// preview jpeg (thumbnails always use the embedded previews)
     #[arg(long)]
     raw_mode: bool,
+
+    /// Font for the single image path bar: a fontconfig family name or a
+    /// path to a font file
+    #[arg(long, value_name = "FAMILY|PATH", default_value = font::DEFAULT_FAMILY)]
+    bar_font: String,
 }
 
 impl Cli {
@@ -325,6 +330,16 @@ fn main() {
         }
     };
 
+    // the font loads off-thread, so a typo'd path is caught here rather
+    // than quietly falling back
+    if font::looks_like_path(&cli.bar_font)
+        && !Path::new(&cli.bar_font).is_file()
+    {
+        tracing::error!("No font file at {:?}", cli.bar_font);
+        drop(guard);
+        std::process::exit(1);
+    }
+
     let max_decode_alloc =
         (cli.max_decode_mem > 0).then(|| cli.max_decode_mem * 1024 * 1024);
     let gpu_budget =
@@ -333,8 +348,14 @@ fn main() {
         true => RawMode::Develop,
         false => RawMode::Preview,
     };
-    let mut app =
-        App::new(paths, cursor_idx, max_decode_alloc, gpu_budget, raw_mode);
+    let mut app = App::new(
+        paths,
+        cursor_idx,
+        max_decode_alloc,
+        gpu_budget,
+        raw_mode,
+        cli.bar_font,
+    );
     event_loop.run_app(&mut app).unwrap();
 }
 

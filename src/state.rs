@@ -8,12 +8,31 @@ use wgpu::{Features, TextureFormat, TextureUsages, wgt::PollType};
 use winit::window::{Fullscreen, Window};
 
 use crate::{
+    bar::{self, BarMetrics},
     cache::{ImageCache, LoadClass},
+    font::BarFonts,
     lazy::{
         GenericImage, ImageRequest, LazyImage, LazyVertexBuffer, MipGenerator,
         RenderableImage, Vertices,
     },
 };
+
+/// Everything the path bar's pixels depend on
+#[derive(Debug, PartialEq)]
+struct PathBarKey {
+    path: String,
+    position: String,
+    width: u32,
+    metrics: BarMetrics,
+    /// faces only get appended, so this changes whenever they do
+    face_count: usize,
+}
+
+#[derive(Debug, Default)]
+struct PathBar {
+    key: Option<PathBarKey>,
+    renderable: Option<RenderableImage>,
+}
 
 #[derive(Debug)]
 pub struct State {
@@ -32,6 +51,8 @@ pub struct State {
     invert_pipeline: wgpu::RenderPipeline,
     cursor_buffer: RefCell<LazyVertexBuffer>,
     cursor_bind_group: wgpu::BindGroup,
+    // single image mode path bar
+    path_bar: RefCell<PathBar>,
 }
 
 impl State {
@@ -306,6 +327,7 @@ impl State {
             sampler,
             image_cache: RefCell::new(ImageCache::new(req_sender, gpu_budget)),
             mip_generator,
+            path_bar: RefCell::default(),
         };
 
         state.configure_surface();
@@ -348,6 +370,58 @@ impl State {
 
     pub fn set_title(&self, title: &str) {
         self.window.set_title(title);
+    }
+
+    pub fn scale_factor(&self) -> f64 {
+        self.window.scale_factor()
+    }
+
+    /// Re-rasterizes the path bar when anything it shows changed, so calling
+    /// it every frame is cheap. The texture is exactly the bar's size and
+    /// [`Self::render`] draws it under a viewport covering exactly the bar,
+    /// so texels land 1:1 on pixels
+    pub fn set_path_bar(
+        &self,
+        fonts: &BarFonts,
+        metrics: BarMetrics,
+        path: &str,
+        position: &str,
+    ) {
+        let faces = fonts.faces();
+        let key = PathBarKey {
+            path: path.to_owned(),
+            position: position.to_owned(),
+            width: self.size.width,
+            metrics,
+            face_count: faces.len(),
+        };
+
+        let mut path_bar = self.path_bar.borrow_mut();
+        if path_bar.key.as_ref() == Some(&key) {
+            return;
+        }
+
+        // arriving fallbacks change the face count, which redraws the bar
+        for text in [path, position] {
+            fonts.request_missing(&faces, text);
+        }
+
+        path_bar.renderable =
+            (key.width > 0 && metrics.height > 0).then(|| {
+                let img =
+                    bar::rasterize(&faces, metrics, key.width, path, position);
+                let mut renderable = RenderableImage::new(
+                    &img,
+                    &self.device,
+                    &self.queue,
+                    &self.bind_group_layout,
+                    &self.sampler,
+                    None,
+                );
+                renderable.resize(Vertices::new());
+                renderable
+            });
+        path_bar.key = Some(key);
     }
 
     /// See [`ImageCache::enforce_budget`]; true means the caller must
@@ -459,13 +533,25 @@ impl State {
         }
     }
 
+    /// `show_bar` must be the same decision the images were laid out with
+    /// (their height is what's left above the bar), and the bar must have
+    /// been set for the current frame via [`Self::set_path_bar`]
     pub fn render<'a>(
         &self,
         images: impl Iterator<Item = &'a LazyImage>,
         class: LoadClass,
         show_cursor: bool,
+        show_bar: bool,
     ) {
         self.image_cache.borrow_mut().advance_frame();
+
+        let mut path_bar = self.path_bar.borrow_mut();
+        let (ww, wh) = (self.size.width, self.size.height);
+        let bar = match (show_bar, &path_bar.key) {
+            (true, Some(key)) => Some(key.metrics.height),
+            _ => None,
+        };
+        debug_assert!(bar.is_none_or(|bar_h| bar_h < wh));
 
         let surface_texture = match self.surface.get_current_texture() {
             // suboptimal: the Resized event path reconfigures the surface,
@@ -510,10 +596,16 @@ impl State {
 
         renderpass.set_pipeline(&self.render_pipeline);
 
+        if let Some(bar_h) = bar {
+            let content_h = (wh - bar_h) as f32;
+            renderpass.set_viewport(0.0, 0.0, ww as f32, content_h, 0.0, 1.0);
+        }
+
         self.apply_op_to_image_states(images, class, false, |renderable, _| {
             renderable.render(&mut renderpass);
         });
 
+        // laid out in the same content area as the images
         if show_cursor {
             if let Some(buffer) = self.cursor_buffer.borrow_mut().get() {
                 renderpass.set_pipeline(&self.invert_pipeline);
@@ -523,6 +615,23 @@ impl State {
             } else {
                 tracing::warn!("No cursor buffer");
             }
+        }
+
+        // drawn last and opaque, so even a zoomed image can't show over it
+        if let Some(bar_h) = bar
+            && let Some(renderable) = &mut path_bar.renderable
+        {
+            let content_h = (wh - bar_h) as f32;
+            renderpass.set_viewport(
+                0.0,
+                content_h,
+                ww as f32,
+                bar_h as f32,
+                0.0,
+                1.0,
+            );
+            renderpass.set_pipeline(&self.render_pipeline);
+            renderable.render(&mut renderpass);
         }
 
         drop(renderpass);

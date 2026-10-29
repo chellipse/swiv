@@ -21,6 +21,13 @@ toggled via `RET`.
 | `j` / `down` | move down one gallery row |
 | `g` / `G` | first / last image |
 | `f` | toggle fullscreen |
+| `b` | toggle the path bar |
+
+The path bar along the bottom shows the current image's path (in the
+gallery, the one under the cursor) and its position in the list. Its
+font defaults to fontconfig's `monospace`; pass `--bar-font` a family
+name or a font file to change it. Without fontconfig, a bundled DejaVu
+Sans Mono is used.
 
 ### Gallery
 
@@ -98,3 +105,6 @@ previews.
 ## License
 
 [MIT](LICENSE)
+
+The bundled DejaVu Sans Mono font is under its own
+[license](assets/FONT-LICENSE.txt).

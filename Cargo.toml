@@ -13,6 +13,7 @@ strip = false
 opt-level = 3
 
 [dependencies]
+ab_glyph = "0.2.31"
 anyhow = "1.0.99"
 bytemuck = { version = "1.23.2", features = ["derive"] }
 clap = { version = "4.5.46", features = ["derive"] }

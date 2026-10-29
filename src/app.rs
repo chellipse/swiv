@@ -16,7 +16,9 @@ use winit::{
 };
 
 use crate::{
+    bar::BarMetrics,
     cache::{LoadClass, bucket_for},
+    font::BarFonts,
     keymap::{KeySpec, Keymap, MappableApp},
     lazy::{ImageLoaderService, LazyImage},
     raw::RawMode,
@@ -41,6 +43,7 @@ static KEYMAPS: LazyLock<Vec<Keymap<App>>> = LazyLock::new(|| {
         KeySpec::new("k").unwrap().to_bind(App::up),
         KeySpec::new("up").unwrap().to_bind(App::up),
         KeySpec::new("f").unwrap().to_bind(App::toggle_fullscreen),
+        KeySpec::new("b").unwrap().to_bind(App::toggle_bar),
         KeySpec::new("g").unwrap().to_bind(App::go_top),
         KeySpec::new("S-g").unwrap().to_bind(App::go_bottom),
         // gallery
@@ -169,6 +172,10 @@ pub struct App {
     drag_start_pos: Option<Point2>,
     drag_total: Point2,
     scale: f32,
+    show_bar: bool,
+    /// loaded off-thread; the bar draws without text until the primary
+    /// face arrives
+    bar_fonts: BarFonts,
 
     // switches
     exiting: bool,
@@ -186,7 +193,11 @@ impl App {
         max_decode_alloc: Option<u64>,
         gpu_budget_override: Option<u64>,
         raw_mode: RawMode,
+        bar_font: String,
     ) -> Self {
+        // started first: fontconfig and reading the font take a while
+        let bar_fonts = BarFonts::spawn(bar_font);
+
         // safe default until the render state publishes the device's real
         // limit; requests can't fire before then (they originate from the
         // render state's cache)
@@ -255,6 +266,8 @@ impl App {
             gpu_budget,
             max_texture_dim,
             scale: 1.0,
+            show_bar: true,
+            bar_fonts,
         }
     }
 
@@ -274,6 +287,13 @@ impl App {
     pub fn toggle_mode(&mut self) {
         self.mode.toggle();
         self.scroll_accum_px = 0.0;
+    }
+
+    pub fn toggle_bar(&mut self) {
+        self.show_bar = !self.show_bar;
+        // the gallery grid is sized against the content height
+        self.col_no_recalc();
+        self.ensure_cursor_visible();
     }
 
     pub fn row_no_reset(&mut self) {
@@ -344,7 +364,7 @@ impl App {
 
     pub fn drag_start(&mut self) {
         if let Some(cursor) = &self.cursor_pos
-            && let Some(size) = &self.window_size
+            && let Some(size) = &self.content_size()
         {
             self.drag_start_pos = Some(cursor.to_ndc(size));
         }
@@ -364,7 +384,7 @@ impl App {
     }
 
     pub fn resize(&self) {
-        let size = self.window_size.unwrap();
+        let size = self.content_size().unwrap();
 
         match self.mode {
             Mode::Gallery => {
@@ -469,7 +489,7 @@ impl App {
                 let images = self.visible_grid_images().iter().filter(|img| {
                     were_images_removed || non_err_paths.contains(img.path())
                 });
-                let size = self.window_size.unwrap();
+                let size = self.content_size().unwrap();
                 self.state.as_ref().unwrap().resize(
                     images,
                     self.gallery_class(),
@@ -518,6 +538,12 @@ impl App {
     }
 
     pub fn set_row_offset(&mut self, value: usize) {
+        // an empty grid has nothing to scroll, and clamping the cursor to
+        // it would lose the selection
+        if self.col_no == 0 {
+            return;
+        }
+
         if self.row_offset != value {
             self.row_offset = value;
             self.bound_cursor_to_grid();
@@ -558,9 +584,10 @@ impl App {
 // within setters
 impl App {
     fn col_no_recalc(&mut self) {
-        if let Some(size) = self.window_size {
+        if let Some(size) = self.content_size() {
             let grid_height = size.height / self.row_no;
-            self.col_no = size.width / grid_height;
+            // rows under a pixel tall leave no grid to show
+            self.col_no = size.width.checked_div(grid_height).unwrap_or(0);
         }
     }
 
@@ -568,6 +595,10 @@ impl App {
     /// based on row_no, col_no, and row_offset.
     /// This ensures the cursor doesn't exceed the grid boundaries.
     fn bound_cursor_to_grid(&mut self) {
+        if self.col_no == 0 {
+            return;
+        }
+
         let grid_size = (self.row_no * self.col_no) as usize;
         let grid_start = self.row_offset * self.col_no as usize;
         let grid_end = (grid_start + grid_size).min(self.images.len());
@@ -611,25 +642,60 @@ impl App {
 
     /// The thumbnail class gallery cells currently want, derived from the
     /// cell side length in physical pixels (cells are squares of side
-    /// `window_height / row_no`, see [`Self::col_no_recalc`])
+    /// `content_height / row_no`, see [`Self::col_no_recalc`])
     fn gallery_class(&self) -> LoadClass {
-        let size = self.window_size.unwrap();
+        let size = self.content_size().unwrap();
         LoadClass::Thumb(bucket_for(size.height / self.row_no))
     }
 
+    /// NDC are relative to the content area, so drag stays 1:1 with the
+    /// cursor while the bar takes up part of the window
     fn get_drag_offset_ndc(&self) -> Option<Point2> {
-        match self {
-            Self {
-                window_size: Some(window_size),
-                drag_start_pos: Some(start),
-                cursor_pos: Some(current),
-                ..
-            } => {
-                let current_ndc = current.to_ndc(window_size);
-                Some(current_ndc - *start)
+        match (self.content_size(), self.drag_start_pos, self.cursor_pos) {
+            (Some(size), Some(start), Some(current)) => {
+                let current_ndc = current.to_ndc(&size);
+                Some(current_ndc - start)
             }
             _ => None,
         }
+    }
+
+    /// Path bar sizes, when the bar is showing. The one place that decides
+    /// it: layout ([`Self::content_size`]) and rendering both follow this
+    fn bar_metrics(&self) -> Option<BarMetrics> {
+        let state = self.state.as_ref()?;
+        let window = self.window_size?;
+        let metrics = BarMetrics::new(state.scale_factor());
+        // a window no taller than the bar shows just the images
+        (self.show_bar && metrics.height < window.height).then_some(metrics)
+    }
+
+    /// The window area images are laid out in: everything above the bar
+    fn content_size(&self) -> Option<PhysicalSize<u32>> {
+        let mut size = self.window_size?;
+        if let Some(metrics) = self.bar_metrics() {
+            size.height -= metrics.height;
+        }
+        Some(size)
+    }
+
+    /// Cheap when nothing changed, see [`State::set_path_bar`]
+    fn update_path_bar(&self) {
+        let Some(metrics) = self.bar_metrics() else {
+            return;
+        };
+
+        // the path as walked, which is what was typed
+        let path = self.images[self.cursor_idx].path().to_string_lossy();
+        let path = path.strip_prefix("./").unwrap_or(&path);
+        let position = format!("{}/{}", self.cursor_idx + 1, self.images.len());
+
+        self.state.as_ref().unwrap().set_path_bar(
+            &self.bar_fonts,
+            metrics,
+            path,
+            &position,
+        );
     }
 
     pub fn visible_grid_images(&self) -> &[LazyImage] {
@@ -707,6 +773,11 @@ impl ApplicationHandler for App {
                     self.resize();
                 }
 
+                // here rather than in resize: fonts arriving change the bar
+                // without any resize happening
+                self.update_path_bar();
+                let show_bar = self.bar_metrics().is_some();
+
                 match self.mode {
                     Mode::Gallery => {
                         let images = self.visible_grid_images().iter();
@@ -714,6 +785,7 @@ impl ApplicationHandler for App {
                             images,
                             self.gallery_class(),
                             true,
+                            show_bar,
                         );
                     }
                     Mode::SingleImage => {
@@ -722,6 +794,7 @@ impl ApplicationHandler for App {
                             std::iter::once(image),
                             LoadClass::Full,
                             false,
+                            show_bar,
                         );
                     }
                 }
@@ -768,7 +841,7 @@ impl ApplicationHandler for App {
                     }
                     (Mode::Gallery, MouseScrollDelta::PixelDelta(pos)) => {
                         self.scroll_accum_px += pos.y;
-                        let row_h = self.window_size.unwrap().height as f64
+                        let row_h = self.content_size().unwrap().height as f64
                             / self.row_no as f64;
 
                         // a single coalesced event can be worth several
