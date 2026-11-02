@@ -4,7 +4,9 @@ use std::{
 };
 
 use crossbeam_channel::Sender;
-use wgpu::{Features, TextureFormat, TextureUsages, wgt::PollType};
+use wgpu::{
+    Features, TextureFormat, TextureUsages, util::DeviceExt, wgt::PollType,
+};
 use winit::window::{Fullscreen, Window};
 
 use crate::{
@@ -51,6 +53,9 @@ pub struct State {
     invert_pipeline: wgpu::RenderPipeline,
     cursor_buffer: RefCell<LazyVertexBuffer>,
     cursor_bind_group: wgpu::BindGroup,
+    /// one quad per selected cell in the visible grid; rebuilt whole on
+    /// every gallery layout since it is tiny and changes rarely
+    selection_buffer: RefCell<Option<(wgpu::Buffer, u32)>>,
     // single image mode path bar
     path_bar: RefCell<PathBar>,
 }
@@ -323,6 +328,7 @@ impl State {
             invert_pipeline,
             cursor_buffer,
             cursor_bind_group,
+            selection_buffer: RefCell::new(None),
             bind_group_layout,
             sampler,
             image_cache: RefCell::new(ImageCache::new(req_sender, gpu_budget)),
@@ -502,6 +508,38 @@ impl State {
         let _ = self.device.poll(PollType::wait_indefinitely());
     }
 
+    /// `selected` are grid-relative positions, as the cursor index passed
+    /// to [`Self::resize`] is. Must be called with the same layout
+    pub fn set_gallery_selection(
+        &self,
+        ww: f32,
+        wh: f32,
+        row_no: f32,
+        col_no: f32,
+        selected: impl Iterator<Item = usize>,
+    ) {
+        let vertices: Vec<f32> = selected
+            .flat_map(|pos| {
+                Vertices::gallery_selection_frame(
+                    ww, wh, row_no, col_no, pos as f32,
+                )
+            })
+            .flat_map(|strip| strip.finish())
+            .collect();
+
+        let quads = (vertices.len() / Vertices::FLOATS_PER_QUAD) as u32;
+        *self.selection_buffer.borrow_mut() = (quads > 0).then(|| {
+            let buffer = self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("Gallery selection vertex buffer"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                },
+            );
+            (buffer, quads)
+        });
+    }
+
     pub fn resize_single_image<'a>(
         &self,
         image: &'a LazyImage,
@@ -614,6 +652,13 @@ impl State {
                 renderpass.draw(0..6, 0..1);
             } else {
                 tracing::warn!("No cursor buffer");
+            }
+
+            if let Some((buffer, quads)) = &*self.selection_buffer.borrow() {
+                renderpass.set_pipeline(&self.invert_pipeline);
+                renderpass.set_bind_group(0, &self.cursor_bind_group, &[]);
+                renderpass.set_vertex_buffer(0, buffer.slice(..));
+                renderpass.draw(0..6 * quads, 0..1);
             }
         }
 

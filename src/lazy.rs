@@ -874,6 +874,9 @@ pub struct Vertices {
 }
 
 impl Vertices {
+    /// 6 vertices of 4 floats, see [`Self::finish`]
+    pub const FLOATS_PER_QUAD: usize = 24;
+
     pub fn new() -> Self {
         Self {
             tlx: -1.0,
@@ -887,7 +890,7 @@ impl Vertices {
         }
     }
 
-    pub fn finish(&self) -> [f32; 24] {
+    pub fn finish(&self) -> [f32; Self::FLOATS_PER_QUAD] {
         [
             // Position x-y Texture x-y
             self.blx, self.bly, 0.0, 1.0, // Bottom left
@@ -1031,6 +1034,58 @@ impl Vertices {
             .left(-unit_width)
             .right(-unit_width + (unit_width / 2.5))
             .transpose(col_offset * cell_width, -row_offset * cell_height)
+    }
+
+    /// A thin frame hugging the edges of a gallery cell, as four quads
+    /// (top, bottom, left, right). Laid out like [`Self::gallery_cursor`],
+    /// whose corner mark stays visible inside the frame
+    pub fn gallery_selection_frame(
+        ww: f32,
+        wh: f32,
+        row_no: f32,
+        col_no: f32,
+        pos: f32,
+    ) -> [Self; 4] {
+        let margin = ww.rem(wh.div(row_no).trunc()) / ww;
+
+        let col_idx = pos % col_no;
+        let row_idx = (pos - col_idx) / col_no;
+
+        let col_offset = col_idx - (col_no - 1.0) / 2.0;
+        let row_offset = row_idx - (row_no - 1.0) / 2.0;
+
+        let cell_height = 2.0 / row_no;
+        let cell_width = (2.0 - margin * 2.0) / col_no;
+
+        let unit_height = 1.0 / row_no;
+        let unit_width = (1.0 - margin) / col_no;
+
+        // frame thickness as a fraction of the cell side, in each axis'
+        // own NDC scale so it is square on screen
+        const FRACTION: f32 = 1.0 / 24.0;
+        let tx = unit_width * 2.0 * FRACTION;
+        let ty = unit_height * 2.0 * FRACTION;
+
+        let dx = col_offset * cell_width;
+        let dy = -row_offset * cell_height;
+        let strip = |top: f32, bot: f32, left: f32, right: f32| {
+            Self::new()
+                .top(top)
+                .bot(bot)
+                .left(left)
+                .right(right)
+                .transpose(dx, dy)
+        };
+
+        // the sides stop short of the top and bottom strips: inverting a
+        // corner twice would restore it
+        let (inner_top, inner_bot) = (unit_height - ty, -unit_height + ty);
+        [
+            strip(unit_height, inner_top, -unit_width, unit_width),
+            strip(inner_bot, -unit_height, -unit_width, unit_width),
+            strip(inner_top, inner_bot, -unit_width, -unit_width + tx),
+            strip(inner_top, inner_bot, unit_width - tx, unit_width),
+        ]
     }
 
     pub fn single_image(

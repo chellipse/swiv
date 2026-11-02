@@ -296,7 +296,8 @@ fn spawn_mem_logger(path: PathBuf) {
 }
 
 fn main() {
-    let (stdout, guard) = tracing_appender::non_blocking(std::io::stdout());
+    // stderr: stdout is reserved for the selected paths printed on exit
+    let (stderr, guard) = tracing_appender::non_blocking(std::io::stderr());
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -305,7 +306,7 @@ fn main() {
                     tracing_subscriber::EnvFilter::new("error")
                 }),
         )
-        .with_writer(stdout)
+        .with_writer(stderr)
         .event_format(CustomFormat::new())
         .init();
 

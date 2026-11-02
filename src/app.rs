@@ -47,6 +47,7 @@ static KEYMAPS: LazyLock<Vec<Keymap<App>>> = LazyLock::new(|| {
         KeySpec::new("g").unwrap().to_bind(App::go_top),
         KeySpec::new("S-g").unwrap().to_bind(App::go_bottom),
         KeySpec::new("y").unwrap().to_bind(App::yank_path),
+        KeySpec::new("m").unwrap().to_bind(App::toggle_select),
         // gallery
         KeySpec::new("-").unwrap().to_bind(App::row_no_increase).with_mode(Mode::Gallery),
         KeySpec::new("S-=").unwrap().to_bind(App::row_no_decrease).with_mode(Mode::Gallery), // '+'
@@ -156,6 +157,9 @@ pub struct App {
     /// - must be bounded within [`Self::images`], which changes in size (during error removal)
     /// - must be dragged by [`Self::row_offset`]
     cursor_idx: usize,
+    /// keyed by path rather than index so it survives error removal from
+    /// [`Self::images`]; printed to stdout in list order on exit
+    selected: HashSet<PathBuf>,
 
     // gallery mode state
     /// changed via user input
@@ -259,6 +263,7 @@ impl App {
             drag_start_pos: None,
             drag_total: Point2::new(0.0, 0.0),
             cursor_idx,
+            selected: HashSet::new(),
             row_offset: 0,
             scroll_accum_px: 0.0,
             exiting,
@@ -327,6 +332,37 @@ impl App {
 
     pub fn go_bottom(&mut self) {
         self.set_cursor_idx(self.images.len() - 1);
+    }
+
+    /// Toggles selection of the current image, then advances so repeated
+    /// presses walk the list
+    pub fn toggle_select(&mut self) {
+        let path = self.images[self.cursor_idx].path();
+        if !self.selected.remove(path) {
+            self.selected.insert(path.to_path_buf());
+        }
+        let last = self.images.len() - 1;
+        self.set_cursor_idx(self.cursor_idx.saturating_add(1).min(last));
+    }
+
+    /// Writes the selected paths, as walked, newline delimited to stdout.
+    /// Called from every exit path so the list is never lost
+    pub fn print_selection(&self) {
+        use std::io::Write;
+
+        if self.selected.is_empty() {
+            return;
+        }
+
+        let mut stdout = std::io::stdout().lock();
+        for img in &self.images {
+            if self.selected.contains(img.path()) {
+                let _ =
+                    stdout.write_all(img.path().as_os_str().as_encoded_bytes());
+                let _ = stdout.write_all(b"\n");
+            }
+        }
+        let _ = stdout.flush();
     }
 
     /// Copies the current image's absolute path to the system clipboard
@@ -457,6 +493,7 @@ impl App {
                     self.col_no as f32,
                     self.get_rel_cursor_idx() as f32,
                 );
+                self.update_selection_markers();
             }
             Mode::SingleImage => {
                 let image = &self.images[self.cursor_idx];
@@ -558,6 +595,7 @@ impl App {
                     self.col_no as f32,
                     self.get_rel_cursor_idx() as f32,
                 );
+                self.update_selection_markers();
             }
             Mode::SingleImage => {
                 if non_err_paths.contains(self.images[self.cursor_idx].path()) {
@@ -738,6 +776,23 @@ impl App {
         Some(size)
     }
 
+    /// Rebuilds the gallery selection markers against the current layout;
+    /// must follow a gallery [`State::resize`] with the same grid
+    fn update_selection_markers(&self) {
+        let size = self.content_size().unwrap();
+        self.state.as_ref().unwrap().set_gallery_selection(
+            size.width as f32,
+            size.height as f32,
+            self.row_no as f32,
+            self.col_no as f32,
+            self.visible_grid_images()
+                .iter()
+                .enumerate()
+                .filter(|(_, img)| self.selected.contains(img.path()))
+                .map(|(pos, _)| pos),
+        );
+    }
+
     /// Cheap when nothing changed, see [`State::set_path_bar`]
     fn update_path_bar(&self) {
         let Some(metrics) = self.bar_metrics() else {
@@ -745,9 +800,15 @@ impl App {
         };
 
         // the path as walked, which is what was typed
-        let path = self.images[self.cursor_idx].path().to_string_lossy();
+        let image = &self.images[self.cursor_idx];
+        let path = image.path().to_string_lossy();
         let path = path.strip_prefix("./").unwrap_or(&path);
-        let position = format!("{}/{}", self.cursor_idx + 1, self.images.len());
+        let marker = match self.selected.contains(image.path()) {
+            true => " *",
+            false => "",
+        };
+        let position =
+            format!("{}/{}{marker}", self.cursor_idx + 1, self.images.len());
 
         self.state.as_ref().unwrap().set_path_bar(
             &self.bar_fonts,
@@ -811,6 +872,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 tracing::debug!("The close button was pressed; stopping");
+                self.print_selection();
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
@@ -819,9 +881,11 @@ impl ApplicationHandler for App {
                 // checked after resize_fresh_images: it may have just
                 // emptied the collection, which rendering cannot survive
                 if self.exiting {
+                    // stderr: stdout carries the selection for piping
                     if let Some(msg) = &self.exit_msg {
-                        println!("{}: {msg}", env!("CARGO_PKG_NAME"));
+                        eprintln!("{}: {msg}", env!("CARGO_PKG_NAME"));
                     }
+                    self.print_selection();
                     std::process::exit(0);
                 }
 

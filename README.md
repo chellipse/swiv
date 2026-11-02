@@ -23,6 +23,7 @@ toggled via `RET`.
 | `f` | toggle fullscreen |
 | `b` | toggle the path bar |
 | `y` | copy the current image's absolute path to the clipboard |
+| `m` | toggle selection of the current image, then advance |
 
 The path bar along the bottom shows the current image's path (in the
 gallery, the one under the cursor) and its position in the list. Its
@@ -32,6 +33,15 @@ Sans Mono is used.
 
 Copying to the clipboard shells out to `wl-copy`, falling back to
 `xclip` or `xsel`, so one of them must be on `PATH`.
+
+Selected images show an inverted frame around their gallery cell and
+a `*` after the position in the path bar. When swiv
+exits, the selected paths are written to stdout, one per line, in list
+order. Logs go to stderr, so the output can be piped:
+
+```sh
+swiv ~/photos | xargs -d '\n' cp -t ~/picks
+```
 
 ### Gallery
 
