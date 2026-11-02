@@ -46,6 +46,7 @@ static KEYMAPS: LazyLock<Vec<Keymap<App>>> = LazyLock::new(|| {
         KeySpec::new("b").unwrap().to_bind(App::toggle_bar),
         KeySpec::new("g").unwrap().to_bind(App::go_top),
         KeySpec::new("S-g").unwrap().to_bind(App::go_bottom),
+        KeySpec::new("y").unwrap().to_bind(App::yank_path),
         // gallery
         KeySpec::new("-").unwrap().to_bind(App::row_no_increase).with_mode(Mode::Gallery),
         KeySpec::new("S-=").unwrap().to_bind(App::row_no_decrease).with_mode(Mode::Gallery), // '+'
@@ -326,6 +327,64 @@ impl App {
 
     pub fn go_bottom(&mut self) {
         self.set_cursor_idx(self.images.len() - 1);
+    }
+
+    /// Copies the current image's absolute path to the system clipboard
+    pub fn yank_path(&mut self) {
+        let path = self.images[self.cursor_idx].path();
+        let path =
+            std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+
+        // (program, args) in order of preference; wl-copy forks to serve the
+        // selection so the parent returns promptly
+        const TOOLS: [(&str, &[&str]); 3] = [
+            ("wl-copy", &["--"]),
+            ("xclip", &["-selection", "clipboard", "--"]),
+            ("xsel", &["--clipboard", "--input", "--"]),
+        ];
+
+        for (prog, args) in TOOLS {
+            // xclip/xsel read from stdin; wl-copy takes an argument. Feed stdin
+            // to all of them, with the path also as an argument for wl-copy.
+            let mut cmd = std::process::Command::new(prog);
+            cmd.args(args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if prog == "wl-copy" {
+                cmd.arg(&path);
+            }
+
+            let mut child = match cmd.spawn() {
+                Ok(child) => child,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    tracing::error!("Failed to run {prog}: {e}");
+                    return;
+                }
+            };
+
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(path.as_os_str().as_encoded_bytes());
+            }
+
+            // reap in the background so the UI thread never blocks
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+
+            tracing::info!(
+                "Copied to clipboard via {prog}: {}",
+                path.display()
+            );
+            return;
+        }
+
+        tracing::error!(
+            "No clipboard tool found (tried wl-copy, xclip, xsel); cannot copy {}",
+            path.display()
+        );
     }
 
     pub fn left(&mut self) {

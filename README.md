@@ -22,12 +22,16 @@ toggled via `RET`.
 | `g` / `G` | first / last image |
 | `f` | toggle fullscreen |
 | `b` | toggle the path bar |
+| `y` | copy the current image's absolute path to the clipboard |
 
 The path bar along the bottom shows the current image's path (in the
 gallery, the one under the cursor) and its position in the list. Its
 font defaults to fontconfig's `monospace`; pass `--bar-font` a family
 name or a font file to change it. Without fontconfig, a bundled DejaVu
 Sans Mono is used.
+
+Copying to the clipboard shells out to `wl-copy`, falling back to
+`xclip` or `xsel`, so one of them must be on `PATH`.
 
 ### Gallery
 
